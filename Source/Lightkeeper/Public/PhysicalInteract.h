@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
+#include "GameplayTagContainer.h"
 #include "PhysicalInteract.generated.h"
 
 // 1. NASZ SŁOWNIK (ENUM) - Dodajemy go tutaj, żeby cały projekt go widział
@@ -74,5 +75,11 @@ public:
 	bool IsLatched();
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	FGameplayTag GetPropSizeTag();
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	bool IsSmallProp();
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	float GetSlamForce();
 };

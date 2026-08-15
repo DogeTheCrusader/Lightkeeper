@@ -46,4 +46,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Stamina")
 	void StopSprint();
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Stamina")
+	bool bWantsToSprint = false;
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Stamina")
+	void HandleLanded();
 };

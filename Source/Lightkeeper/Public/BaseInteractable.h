@@ -3,10 +3,11 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "PhysicalInteract.h"
+#include "GameplayTagContainer.h"
 #include "BaseInteractable.generated.h"
 
-	UCLASS(Blueprintable)
-	class LIGHTKEEPER_API ABaseInteractable : public AActor, public IPhysicalInteract
+UCLASS(Blueprintable)
+class LIGHTKEEPER_API ABaseInteractable : public AActor, public IPhysicalInteract
 {
 	GENERATED_BODY()
 
@@ -50,7 +51,7 @@ public:
 	void BreakObject(); // Uniwersalna funkcja zniszczenia!
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	bool bIsSmallProp = false; // Domyślnie FALSE (duże obiekty). Dla puszek/butelek zaznaczasz TRUE!
+	FGameplayTag PropSizeTag;
 
 	// ==========================================================
 	// FUNKCJE INTERFEJSU C++
@@ -66,5 +67,7 @@ public:
 	virtual void OnLockedInteraction_Implementation(AActor* InstigatorActor) override;
 	virtual void SetLocked_Implementation(bool bNewLocked) override;
 	virtual bool IsLatched_Implementation() override;
+	virtual FGameplayTag GetPropSizeTag_Implementation() override;
 	virtual bool IsSmallProp_Implementation() override;
+	virtual float GetSlamForce_Implementation() override;
 };

@@ -5,6 +5,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "LightkeeperCharacter.h"
 
 UInteractionComponent::UInteractionComponent()
 {
@@ -14,6 +15,8 @@ UInteractionComponent::UInteractionComponent()
 void UInteractionComponent::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (bIsInspecting) return;
 
 	AActor* Owner = GetOwner();
 	if (Owner)
@@ -103,52 +106,61 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 				APlayerController* PC = GetWorld()->GetFirstPlayerController();
 				FVector CameraLoc = (PC && PC->PlayerCameraManager) ? PC->PlayerCameraManager->GetCameraLocation() : OwnerLoc;
 
-				float PropDistance = FVector::Dist(CameraLoc, GrabbedComp->GetComponentLocation());
-				if (PropDistance > (InteractionDistance + BreakDistanceBuffer))
+				if (!bIsInspecting)
 				{
-					StopInteraction(); // Utknął -> puść
-					return;
+					float PropDistance = FVector::Dist(CameraLoc, GrabbedComp->GetComponentLocation());
+					if (PropDistance > (InteractionDistance + BreakDistanceBuffer))
+					{
+						StopInteraction(); // Utknął -> puść
+						return;
+					}
+
+
+					// ====================================================================
+					// 2. STREFA BEZPIECZEŃSTWA NÓG (BLOKADA PRZECIĄGANIA POD SIEBIE!)
+					// ====================================================================
+					FVector FinalTargetLoc = DesiredHoldLoc;
+
+					// Obliczamy dystans w poziomie (XY), ignorując wysokość (Z)
+					FVector2D PlayerXY(OwnerLoc.X, OwnerLoc.Y);
+					FVector2D HoldXY(DesiredHoldLoc.X, DesiredHoldLoc.Y);
+					float HorizontalDist = FVector2D::Distance(PlayerXY, HoldXY);
+
+					float MinKeepOutRadius = 30.0f; // Minimalny bezpieczny promień od środka gracza (w cm)
+
+					bool bIsLookingDown = DesiredHoldLoc.Z < CameraLoc.Z;
+
+					if (bIsLookingDown && HorizontalDist < MinKeepOutRadius)
+					{
+						// Wektor przodu gracza na płaszczyźnie poziomej
+						FVector ForwardXY = Owner->GetActorForwardVector();
+						ForwardXY.Z = 0.0f;
+						ForwardXY = ForwardXY.GetSafeNormal();
+
+						// Wypychamy cel dokładnie na krawędź 75 cm przed nasze buty!
+						FVector SafeXY = OwnerLoc + (ForwardXY * MinKeepOutRadius);
+						FinalTargetLoc.X = SafeXY.X;
+						FinalTargetLoc.Y = SafeXY.Y;
+					}
+
+					// Blokada wbijania w podłogę pod stopy:
+					float MinFloorZ = OwnerLoc.Z - 60.0f; // Poziom stóp
+					if (FinalTargetLoc.Z < MinFloorZ)
+					{
+						FinalTargetLoc.Z = MinFloorZ;
+					}
+
+					// ====================================================================
+					// 3. APILKUJEMY BEZPIECZNĄ POZYCJĘ DO PHYSICS HANDLE
+					// ====================================================================
+					FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * InitialGrabQuat;
+					PhysicsHandle->SetTargetLocationAndRotation(FinalTargetLoc, TargetQuat.Rotator());
 				}
-
-				// ====================================================================
-				// 2. STREFA BEZPIECZEŃSTWA NÓG (BLOKADA PRZECIĄGANIA POD SIEBIE!)
-				// ====================================================================
-				FVector FinalTargetLoc = DesiredHoldLoc;
-
-				// Obliczamy dystans w poziomie (XY), ignorując wysokość (Z)
-				FVector2D PlayerXY(OwnerLoc.X, OwnerLoc.Y);
-				FVector2D HoldXY(DesiredHoldLoc.X, DesiredHoldLoc.Y);
-				float HorizontalDist = FVector2D::Distance(PlayerXY, HoldXY);
-
-				float MinKeepOutRadius = 30.0f; // Minimalny bezpieczny promień od środka gracza (w cm)
-
-				bool bIsLookingDown = DesiredHoldLoc.Z < CameraLoc.Z;
-
-				if (bIsLookingDown && HorizontalDist < MinKeepOutRadius)
+				else
 				{
-					// Wektor przodu gracza na płaszczyźnie poziomej
-					FVector ForwardXY = Owner->GetActorForwardVector();
-					ForwardXY.Z = 0.0f;
-					ForwardXY = ForwardXY.GetSafeNormal();
-
-					// Wypychamy cel dokładnie na krawędź 75 cm przed nasze buty!
-					FVector SafeXY = OwnerLoc + (ForwardXY * MinKeepOutRadius);
-					FinalTargetLoc.X = SafeXY.X;
-					FinalTargetLoc.Y = SafeXY.Y;
+					FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * InitialGrabQuat;
+					PhysicsHandle->SetTargetLocationAndRotation(HoldSlotComponent->GetComponentLocation(), TargetQuat.Rotator());
 				}
-
-				// Blokada wbijania w podłogę pod stopy:
-				float MinFloorZ = OwnerLoc.Z - 60.0f; // Poziom stóp
-				if (FinalTargetLoc.Z < MinFloorZ)
-				{
-					FinalTargetLoc.Z = MinFloorZ;
-				}
-
-				// ====================================================================
-				// 3. APILKUJEMY BEZPIECZNĄ POZYCJĘ DO PHYSICS HANDLE
-				// ====================================================================
-				FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * InitialGrabQuat;
-				PhysicsHandle->SetTargetLocationAndRotation(FinalTargetLoc, TargetQuat.Rotator());
 			}
 		}
 		else
@@ -297,13 +309,38 @@ void UInteractionComponent::StartInteraction()
 						GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 						GrabbedComponent->IgnoreActorWhenMoving(Owner, true);
 
-						// Zrzucamy z podłogi, jeśli stoisz na tym obiekcie
-						ACharacter* CharOwner = Cast<ACharacter>(Owner);
-						if (CharOwner && CharOwner->GetCharacterMovement())
+						float ObjectRadius = GrabbedComponent->Bounds.SphereRadius;
+						CurrentBaseHoldDistance = FMath::Clamp(90.0f + ObjectRadius, 110.0f, 220.0f);
+
+						FVector InitLoc = InitialHoldSlotLocation;
+						InitLoc.X = CurrentBaseHoldDistance;
+						HoldSlotComponent->SetRelativeLocation(InitLoc);
+
+						// ====================================================================
+						// 2. DYNAMICZNA PRĘDKOŚĆ CHODU Z WAGI PRZEDMIOTU:
+						// ====================================================================
+
+						float PropMass = GrabbedComponent->GetMass();
+
+						if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(Owner))
 						{
-							if (CharOwner->GetCharacterMovement()->CurrentFloor.HitResult.GetActor() == GrabbedActor)
+							// Jeśli gracz właśnie podniósł coś cięższego niż 5 kg:
+							if (PropMass > 5.0f)
 							{
-								CharOwner->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+								// 1. Wyłączamy bieg w StaminaComponent (jeśli postać sprintowała):
+								if (UStaminaComponent* Stamina = Char->FindComponentByClass<UStaminaComponent>())
+								{
+									Stamina->StopSprint(); // Zdejmuje flagę bIsSprinting!
+								}
+							}
+
+							// 2. Przeliczamy prędkość (uwzględniając wagę)
+							Char->UpdateMovementSpeed();
+
+							// Zrzucenie z podłogi jeśli gracz stał na skrzyni
+							if (Char->GetCharacterMovement() && Char->GetCharacterMovement()->CurrentFloor.HitResult.GetActor() == GrabbedActor)
+							{
+								Char->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
 							}
 						}
 
@@ -337,103 +374,110 @@ void UInteractionComponent::StopInteraction()
 {
 	if (GrabbedActor)
 	{
-		// 1. NAJPIERW PRZYWRACAMY KOLIZJĘ (Zanim obiekt dostanie "Release" od interfejsu)
 		if (GrabbedComponent)
 		{
 			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
-
-			// ====================================================================
-			// TŁUMIENIE PĘDU TYLKO DLA WOLNYCH PROPÓW (Puszki/Skrzynie)!
-			// Dla drzwi/szuflad ten blok jest OMIJANY, więc drzwi zachowują swój płynny swing.
-			// ====================================================================
 			if (Type == EInteractionType::Grab_Free)
 			{
 				FVector SoftLinearVel = GrabbedComponent->GetPhysicsLinearVelocity() * 0.15f;
 				FVector SoftAngularVel = GrabbedComponent->GetPhysicsAngularVelocityInDegrees() * 0.15f;
-
 				SoftLinearVel = SoftLinearVel.GetClampedToMaxSize(120.0f);
-
 				GrabbedComponent->SetPhysicsLinearVelocity(SoftLinearVel);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(SoftAngularVel);
 			}
-
-			// PRZYWRACAMY DOKŁADNIE TAKĄ KOLIZJĘ, JAKA BYŁA W BLUEPRINTCIE:
 			GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
-
-			if (GetOwner())
-			{
-				GrabbedComponent->IgnoreActorWhenMoving(GetOwner(), false);
-			}
+			GrabbedComponent = nullptr;
 		}
 
-		// 2. Potem wywołujemy zwolnienie w obiekcie
 		if (GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 		{
 			IPhysicalInteract::Execute_ReleaseObject(GrabbedActor);
 		}
 
-		if (PhysicsHandle)
-		{
-			PhysicsHandle->ReleaseComponent();
-		}
+		if (PhysicsHandle) PhysicsHandle->ReleaseComponent();
 
-		// 3. Reset HoldSlota
-		if (HoldSlotComponent)
-		{
-			HoldSlotComponent->SetRelativeLocation(InitialHoldSlotLocation);
-			HoldSlotComponent->SetRelativeRotation(InitialHoldSlotRotation);
-		}
-
-		GrabbedComponent = nullptr;
-		GrabbedActor = nullptr;
+		// ==========================================================
+		// JEDNA CZYSTA LINIJKA CZYSZCZĄCA NA KOŃCU:
+		// ==========================================================
+		CleanupInteraction();
 	}
 }
 
 void UInteractionComponent::SlamInteraction()
 {
 	AActor* Owner = GetOwner();
+	if (!Owner) return;
 
-	if (GrabbedActor)
+	// Jeśli nic nie trzymamy, robimy rzut/wyważenie celując w obiekt z odległości
+	if (!GrabbedActor)
 	{
-		// 1. NAJPIERW PRZYWRACAMY KOLIZJĘ (Zanim obiekt dostanie "Slam" od interfejsu)
-		if (GrabbedComponent)
+		FHitResult HitResult;
+		if (PerformLineTrace(HitResult) && HitResult.GetActor())
 		{
-			// PRZYWRACAMY DOKŁADNIE TAKĄ KOLIZJĘ, JAKA BYŁA W BLUEPRINTCIE:
-			GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
-
-			if (GetOwner())
+			if (HitResult.GetActor()->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 			{
-				GrabbedComponent->IgnoreActorWhenMoving(GetOwner(), false);
+				GrabbedActor = HitResult.GetActor();
+				GrabbedComponent = Cast<UPrimitiveComponent>(HitResult.GetComponent()); // Zapisujemy komponent!
 			}
 		}
+	}
 
-		if (GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+	if (GrabbedActor && GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+	{
+		APlayerController* PC = Owner->GetWorld()->GetFirstPlayerController();
+		FVector Forward = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraRotation().Vector() : Owner->GetActorForwardVector();
+
+		EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
+
+		// ====================================================================
+		// 1. TYLKO DLA WOLNYCH PROPÓW (Grab_Free): Rzut z masą i SlamForce
+		// ====================================================================
+		if (Type == EInteractionType::Grab_Free)
 		{
-			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
-
-			APlayerController* PC = Owner ? Owner->GetWorld()->GetFirstPlayerController() : nullptr;
-			FVector Forward = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraRotation().Vector() : Owner->GetActorForwardVector();
-
-			if (Type == EInteractionType::Grab_Free)
+			if (GrabbedComponent)
 			{
-				if (PhysicsHandle) PhysicsHandle->ReleaseComponent();
-				IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
+				// ====================================================================
+				// 1. ZABIJAMY PĘD OD MYSZKI (Flick nie ma żadnego wpływu na rzut!):
+				// ====================================================================
+				GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
+				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+
+				if (PhysicsHandle)
+				{
+					PhysicsHandle->ReleaseComponent();
+				}
+
+				// ====================================================================
+				// 2. POBIERAMY SLAM FORCE I AGRESYWNIE SKALUJEMY PRZEZ MASĘ:
+				// ====================================================================
+				float ForceToApply = IPhysicalInteract::Execute_GetSlamForce(GrabbedActor);
+				float ObjectMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
+
+				// Zmniejszyliśmy bazę z 50.0 na 20.0, dzięki czemu 100 kg ma niemal zerowy zasięg rzutu:
+				float MassMultiplier = FMath::Clamp(20.0f / ObjectMass, 0.01f, 1.2f);
+
+				// Aplikujemy czysty impuls od zera, uwzględniając wagę:
+				GrabbedComponent->AddImpulse(Forward * (ForceToApply * MassMultiplier), NAME_None, false);
+
+				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
+				GrabbedComponent = nullptr;
 			}
-			else
-			{
-				IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
-			}
+
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
+		}
+		// ====================================================================
+		// 2. DLA DRZWI I MEBLI (Hinge, Translation, Crank): TYLKO WYWAŻENIE W BLUEPRINCIECIE
+		// ====================================================================
+		else
+		{
+			GrabbedComponent = nullptr;
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
 		}
 
-		// 2. Reset HoldSlota
-		if (HoldSlotComponent)
-		{
-			HoldSlotComponent->SetRelativeLocation(InitialHoldSlotLocation);
-			HoldSlotComponent->SetRelativeRotation(InitialHoldSlotRotation);
-		}
-
-		//GrabbedComponent = nullptr;
-		GrabbedActor = nullptr;
+		// ====================================================================
+		// 3. CZYSTY RESET (Przywrócenie prędkości i HoldSlota bez blokowania sprintu):
+		// ====================================================================
+		CleanupInteraction();
 	}
 }
 
@@ -462,8 +506,30 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 {
 	if (bIsInspecting && IsValid(GrabbedActor) && HoldSlotComponent)
 	{
-		HoldSlotComponent->AddLocalRotation(FRotator(-MouseY * 3.0f, MouseX * 3.0f, 0.0f));
-		return true; // Blokuj kamerę dla obracania w 3D
+		float ObjectMass = GrabbedComponent ? GrabbedComponent->GetMass() : 1.0f;
+
+		// BARDZO CIĘŻKI OPOR: 
+		// Mała puszka obraca się znośnie (0.4), ale 30kg skrzynia prawie w ogóle nie drgnie (0.02)!
+		float InspectSensitivity = FMath::Clamp(1.0f / FMath::Max(1.0f, ObjectMass * 0.2f), 0.05f, 0.8f);
+
+		APlayerController* PC = GetOwner()->GetWorld()->GetFirstPlayerController();
+		if (PC && PC->PlayerCameraManager)
+		{
+			FRotator CamRot = PC->PlayerCameraManager->GetCameraRotation();
+
+			// Obliczamy rotację na podstawie ruchu myszki względem kamery gracza:
+			FVector DeltaRotVector = (CamRot.Quaternion() * FVector(-MouseY * InspectSensitivity, MouseX * InspectSensitivity, 0.0f));
+			FRotator DeltaRot(DeltaRotVector.X, DeltaRotVector.Y, DeltaRotVector.Z);
+
+			// Płynne dojeżdżanie do obrotu (lag/wygładzenie, żeby nie było mikro-szarpnięć):
+			FRotator CurrentRot = HoldSlotComponent->GetRelativeRotation();
+			FRotator TargetRot = CurrentRot + DeltaRot;
+			FRotator SmoothedRot = FMath::RInterpTo(CurrentRot, TargetRot, GetWorld()->GetDeltaSeconds(), 25.0f);
+
+			HoldSlotComponent->SetRelativeRotation(SmoothedRot);
+		}
+
+		return true; // Blokujemy kamerę
 	}
 
 	if (IsValid(GrabbedActor) && GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
@@ -531,12 +597,82 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 	return false;
 }
 
+void UInteractionComponent::CleanupInteraction()
+{
+	bIsInspecting = false;
+	// 1. Przywrócenie prędkości gracza / Sprintu
+	if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(GetOwner()))
+	{
+		UStaminaComponent* Stamina = Char->FindComponentByClass<UStaminaComponent>();
+		if (Stamina && Stamina->bWantsToSprint && !Char->bIsCrouched)
+		{
+			Stamina->StartSprint();
+		}
+		else
+		{
+			Char->UpdateMovementSpeed();
+		}
+	}
+
+	// 2. Reset HoldSlota
+	if (HoldSlotComponent)
+	{
+		HoldSlotComponent->SetRelativeLocation(InitialHoldSlotLocation);
+		HoldSlotComponent->SetRelativeRotation(InitialHoldSlotRotation);
+	}
+
+	GrabbedActor = nullptr;
+}
+
 void UInteractionComponent::ZoomHoldSlot(float ScrollDelta)
 {
 	if (HoldSlotComponent && IsValid(GrabbedActor))
 	{
 		FVector Loc = HoldSlotComponent->GetRelativeLocation();
-		Loc.X = FMath::Clamp(Loc.X + (ScrollDelta * 10.0f), 40.0f, 200.0f);
+
+		float MaxSafeDropLimit = (InteractionDistance + BreakDistanceBuffer) - 20.0f;
+		float MinZoom = CurrentBaseHoldDistance - 40.0f;
+		float MaxZoom = FMath::Min(CurrentBaseHoldDistance + 50.0f, MaxSafeDropLimit);
+
+		// Zamiast natychmiastowego skoku, wyliczamy docelową pozycję X:
+		float TargetX = FMath::Clamp(Loc.X + (ScrollDelta * 15.0f), MinZoom, MaxZoom);
+		
+		// Płynnie domykamy pozycję (Interpolacja), co eliminuje jakikolwiek "wybuch" prędkości!
+		Loc.X = FMath::FInterpTo(Loc.X, TargetX, GetWorld()->GetDeltaSeconds(), 20.0f);
+
 		HoldSlotComponent->SetRelativeLocation(Loc);
+	}
+}
+
+float UInteractionComponent::CalculateMovementSpeed(float BaseSpeed, float MassInKg) const
+{
+	// W PRZYSZŁOŚCI (Miejsce na Perk Wigoru):
+	// float EffectiveMass = MassInKg / (1.0f + VigorTier * 0.5f);
+	float EffectiveMass = MassInKg;
+
+	// Obliczamy mnożnik kary za wagę (np. dla 25 kg = 1.0 - (25 * 0.015) = 0.625)
+	float SpeedMultiplier = 1.0f - (EffectiveMass * WeightSpeedReductionFactor);
+
+	// Zabezpieczenie: prędkość nie może spaść poniżej MinCarryingSpeedRatio (np. 30%)
+	SpeedMultiplier = FMath::Clamp(SpeedMultiplier, MinCarryingSpeedRatio, 1.0f);
+
+	return BaseSpeed * SpeedMultiplier;
+}
+
+void UInteractionComponent::ToggleInspectMode()
+{
+	// Działamy TYLKO wtedy, gdy trzymamy wolny prop (Grab_Free)
+	if (!GrabbedActor) return;
+
+	EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
+	if (Type != EInteractionType::Grab_Free) return;
+
+	// Przełączamy stan
+	bIsInspecting = !bIsInspecting;
+
+	// Jeśli wyłączamy inspekcję, resetujemy rotację, żeby przedmiot nie odskoczył
+	if (!bIsInspecting && HoldSlotComponent)
+	{
+		HoldSlotComponent->SetRelativeRotation(InitialHoldSlotRotation);
 	}
 }

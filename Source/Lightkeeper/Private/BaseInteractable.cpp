@@ -81,7 +81,18 @@ bool ABaseInteractable::IsLatched_Implementation()
 	return bIsLatched; // Po prostu zwracamy naszą zmienną!
 }
 
+FGameplayTag ABaseInteractable::GetPropSizeTag_Implementation()
+{
+	return PropSizeTag;
+}
+
 bool ABaseInteractable::IsSmallProp_Implementation()
 {
-	return bIsSmallProp;
+	return PropSizeTag.MatchesTagExact(FGameplayTag::RequestGameplayTag(FName("Prop.Size.Small")));
+}
+
+float ABaseInteractable::GetSlamForce_Implementation()
+{
+	// Zwracamy DOKŁADNIE tę wartość, którą ustawiłeś w panelu Details!
+	return SlamForce;
 }

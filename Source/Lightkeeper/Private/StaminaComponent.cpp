@@ -1,6 +1,8 @@
 ﻿#include "StaminaComponent.h"
 #include "LightkeeperCharacter.h"
 #include "GameFramework/Character.h"
+#include "InteractionComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
 UStaminaComponent::UStaminaComponent()
@@ -35,29 +37,47 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 void UStaminaComponent::StartSprint()
 {
+	bWantsToSprint = true;
+
 	ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
 	if (!OwnerChar || !OwnerChar->GetCharacterMovement()) return;
 
-	// Blokada startu w powietrzu
 	if (OwnerChar->GetCharacterMovement()->IsFalling() && !bIsSprinting) return;
+
+	// Blokada sprintu jeśli trzymany przedmiot waży więcej niż 5 kg:
+	if (UInteractionComponent* InterComp = OwnerChar->FindComponentByClass<UInteractionComponent>())
+	{
+		if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
+		{
+			if (HeldMesh->GetMass() > 5.0f)
+			{
+				return; // ZAKAZ SPRINTU Z CIĘŻKĄ SKRZYNIĄ!
+			}
+		}
+	}
 
 	if (Stamina > 10.0f)
 	{
 		bIsSprinting = true;
-		// Czytamy zmienną SprintSpeed bezpośrednio z Postaci!
-		OwnerChar->GetCharacterMovement()->MaxWalkSpeed = OwnerChar->SprintSpeed;
+		OwnerChar->UpdateMovementSpeed(); // Postać sama ustawi prędkość SprintSpeed!
 	}
 }
 
 void UStaminaComponent::StopSprint()
 {
+	bWantsToSprint = false;
 	bIsSprinting = false;
+
 	if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
 	{
-		if (OwnerChar->GetCharacterMovement())
-		{
-			// Czytamy zmienną WalkSpeed bezpośrednio z Postaci!
-			OwnerChar->GetCharacterMovement()->MaxWalkSpeed = OwnerChar->WalkSpeed;
-		}
+		OwnerChar->UpdateMovementSpeed(); // Postać sama przywróci prędkość WalkSpeed lub CrouchSpeed!
+	}
+}
+
+void UStaminaComponent::HandleLanded()
+{
+	if (bWantsToSprint && !bIsSprinting && Stamina > 10.0f)
+	{
+		StartSprint();
 	}
 }

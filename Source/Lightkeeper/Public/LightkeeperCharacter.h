@@ -92,4 +92,7 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Movement")
 	void StopSprint() { if (StaminaComp) StaminaComp->StopSprint(); }
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Movement")
+	void UpdateMovementSpeed();
 };
