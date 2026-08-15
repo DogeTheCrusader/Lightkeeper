@@ -384,8 +384,10 @@ void UInteractionComponent::StopInteraction()
 				SoftLinearVel = SoftLinearVel.GetClampedToMaxSize(120.0f);
 				GrabbedComponent->SetPhysicsLinearVelocity(SoftLinearVel);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(SoftAngularVel);
+
+				// Przywracamy kolizję TYLKO dla noszonego propa:
+				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
 			}
-			GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
 			GrabbedComponent = nullptr;
 		}
 
@@ -430,40 +432,51 @@ void UInteractionComponent::SlamInteraction()
 		EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
 
 		// ====================================================================
-		// 1. TYLKO DLA WOLNYCH PROPÓW (Grab_Free): Rzut z masą i SlamForce
+		// 1. TYLKO DLA WOLNYCH PROPÓW (Grab_Free): Rzut z masą
 		// ====================================================================
 		if (Type == EInteractionType::Grab_Free)
 		{
+			if (PhysicsHandle)
+			{
+				PhysicsHandle->ReleaseComponent();
+			}
+
 			if (GrabbedComponent)
 			{
-				// ====================================================================
-				// 1. ZABIJAMY PĘD OD MYSZKI (Flick nie ma żadnego wpływu na rzut!):
-				// ====================================================================
+				// 1. Kasujemy pęd od myszki
 				GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 
-				if (PhysicsHandle)
+				// 2. Skalowanie prędkości przez masę (Krzywa pierwiastkowa):
+				float ObjectMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
+				float MassSpeedMultiplier = FMath::Clamp(1.5f / FMath::Sqrt(ObjectMass), 0.1f, 1.4f);
+
+				// 3. Wektor rzutu w celownik + BARDZO SUBTELNE PODBICIE W GÓRĘ (+60 cm/s):
+				FVector FinalThrowVelocity = Forward * (BaseThrowPower * MassSpeedMultiplier);
+				FinalThrowVelocity.Z += 60.0f; // Delikatny, naturalny łuk bez utraty celności!
+
+				if (ACharacter* OwnerChar = Cast<ACharacter>(Owner))
 				{
-					PhysicsHandle->ReleaseComponent();
+					// Dodajemy wektor pędu gracza do puszki (Biegniesz 900 -> rzut leci o 900 szybciej!):
+					FinalThrowVelocity += OwnerChar->GetVelocity();
 				}
 
 				// ====================================================================
-				// 2. POBIERAMY SLAM FORCE I AGRESYWNIE SKALUJEMY PRZEZ MASĘ:
+				// NAPIS DIAGNOSTYCZNY (Masa i Prędkość na ekranie):
 				// ====================================================================
-				float ForceToApply = IPhysicalInteract::Execute_GetSlamForce(GrabbedActor);
-				float ObjectMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan,
+						FString::Printf(TEXT("MASA: %.1f kg | PRĘDKOŚĆ: %.0f cm/s | MNOŻNIK: x%.2f"), ObjectMass, FinalThrowVelocity.Size(), MassSpeedMultiplier));
+				}
 
-				// Zmniejszyliśmy bazę z 50.0 na 20.0, dzięki czemu 100 kg ma niemal zerowy zasięg rzutu:
-				float MassMultiplier = FMath::Clamp(20.0f / ObjectMass, 0.01f, 1.2f);
-
-				// Aplikujemy czysty impuls od zera, uwzględniając wagę:
-				GrabbedComponent->AddImpulse(Forward * (ForceToApply * MassMultiplier), NAME_None, false);
+				GrabbedComponent->AddImpulse(FinalThrowVelocity, NAME_None, true); // Vel Change = TRUE
 
 				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
 				GrabbedComponent = nullptr;
 			}
 
-			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower);
 		}
 		// ====================================================================
 		// 2. DLA DRZWI I MEBLI (Hinge, Translation, Crank): TYLKO WYWAŻENIE W BLUEPRINCIECIE
@@ -471,7 +484,7 @@ void UInteractionComponent::SlamInteraction()
 		else
 		{
 			GrabbedComponent = nullptr;
-			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward);
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower);
 		}
 
 		// ====================================================================

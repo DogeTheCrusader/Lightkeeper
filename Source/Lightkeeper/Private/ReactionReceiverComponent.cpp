@@ -7,13 +7,30 @@ UReactionReceiverComponent::UReactionReceiverComponent()
 
 void UReactionReceiverComponent::ApplyStateImpact(FGameplayTag StateTag, float Intensity)
 {
-	// Sprawdzamy, czy ten obiekt reaguje na ten Stan (np. czy reaguje na Ogień)
-	if (VulnerableStates.HasTag(StateTag))
+	// ====================================================================
+	// SPRAWDZANIE HIERARCHII: Czy otrzymany tag pasuje do RODZICA w VulnerableStates?
+	// ====================================================================
+	bool bIsVulnerable = false;
+	for (const FGameplayTag& VulnTag : VulnerableStates)
 	{
-		// Dodajemy ten Stan do aktywnych
+		if (StateTag.MatchesTag(VulnTag)) // Jeśli StateTag to dziecko VulnTag -> TRUE!
+		{
+			bIsVulnerable = true;
+			break;
+		}
+	}
+
+	if (bIsVulnerable)
+	{
 		ActiveStates.AddTag(StateTag);
 
-		// Wysyłamy informację do Blueprinta obiektu! (np. żeby włączył cząsteczki ognia i zabrał HP)
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow,
+				FString::Printf(TEXT("[ŻYWIOŁ] %s OTRZYMAŁ STAN: %s (Moc: %.1f)"),
+					*GetOwner()->GetName(), *StateTag.ToString(), Intensity));
+		}
+
 		OnStateApplied.Broadcast(StateTag, Intensity);
 	}
 }

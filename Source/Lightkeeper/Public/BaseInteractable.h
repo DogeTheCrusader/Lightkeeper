@@ -6,6 +6,9 @@
 #include "GameplayTagContainer.h"
 #include "BaseInteractable.generated.h"
 
+class UHealthComponent;
+class UReactionReceiverComponent;
+
 UCLASS(Blueprintable)
 class LIGHTKEEPER_API ABaseInteractable : public AActor, public IPhysicalInteract
 {
@@ -20,46 +23,98 @@ protected:
 public:
 	virtual void Tick(float DeltaTime) override;
 
-	// ==========================================================
-	// UNIWERSALNE ZMIENNE FIZYKI (Wszystko w jednej kategorii!)
-	// ==========================================================
+	// ====================================================================
+	// 1. TYP INTERAKCJI (Główny przełącznik)
+	// ====================================================================
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	EInteractionType InteractionType = EInteractionType::Grab_Free; // Domyślnie Drzwi
+	EInteractionType InteractionType = EInteractionType::Grab_Free;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	EMouseAxis PreferredMouseAxis = EMouseAxis::MouseX; // Domyślnie Myszka X
+	// Oś myszki wyświetla się TYLKO dla Drzwi (Hinge) i Szuflad (Translation):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics",
+		meta = (EditCondition = "InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation", EditConditionHides))
+	EMouseAxis PreferredMouseAxis = EMouseAxis::MouseX;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	float InteractionForce = 50.0f; // Uniwersalna siła (Drzwi/Szuflada/Zawór)
+	// Stałe siły i opory wyświetlają się TYLKO dla Mebli i Mechanizmów (Hinge, Translation, Crank):
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lightkeeper|Physics",
+		meta = (EditCondition = "InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation || InteractionType == EInteractionType::Crank", EditConditionHides))
+	float BaseInteractionPower = 15.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	float SlamForce = 1600.0f; // Uniwersalna siła trzaśnięcia/rzutu (RMB)
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lightkeeper|Physics",
+		meta = (EditCondition = "InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation || InteractionType == EInteractionType::Crank", EditConditionHides))
+	float ReferenceMass = 30.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
-	bool bIsHeld = false; // Czy gracz obecnie to trzyma?
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics",
+		meta = (EditCondition = "InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation || InteractionType == EInteractionType::Crank", EditConditionHides))
+	float MechanicalFriction = 1.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|State")
-	bool bIsLatched = true; // Czy obiekt jest zatrzaśnięty w ramie?	
-
-	UPROPERTY(BlueprintReadOnly, Category = "Lightkeeper|State")
-	bool bIsBroken = false; // Czy obiekt został zniszczony?
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|State")
-	bool bIsLocked = false;
-
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Lightkeeper|Interaction")
-	void BreakObject(); // Uniwersalna funkcja zniszczenia!
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
+	// Rozmiar Propa wyświetla się TYLKO dla wolnych przedmiotów (Grab_Free):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics",
+		meta = (EditCondition = "InteractionType == EInteractionType::Grab_Free", EditConditionHides))
 	FGameplayTag PropSizeTag;
 
-	// ==========================================================
-	// FUNKCJE INTERFEJSU C++
-	// ==========================================================
+	// Materiał (Drewno, Metal, Szkło) dotyczy KAŻDEGO obiektu w grze:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
+	FGameplayTag MaterialTag;
 
+	// ====================================================================
+	// 2. ZMIENNE STANU
+	// ====================================================================
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|State")
+	bool bIsHeld = false; // Widoczne tylko do podglądu (ustawiane przez C++)
+
+	// Zatrzask w ramie wyświetla się TYLKO dla Drzwi (Hinge) i Zasuwek (Bolt):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|State",
+		meta = (EditCondition = "InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Bolt", EditConditionHides))
+	bool bIsLatched = true;
+
+	// Zamek na klucz (Dla Drzwi, Szuflad i Zasuwek):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|State",
+		meta = (EditCondition = "InteractionType != EInteractionType::Grab_Free", EditConditionHides))
+	bool bIsLocked = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|State")
+	bool bIsBroken = false;
+
+	// ====================================================================
+	// 3. SYSTEM ZNISZCZEŃ I ŻYWIOŁÓW (ImSim)
+	// ====================================================================
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UHealthComponent* HealthComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UReactionReceiverComponent* ReactionComp;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction")
+	bool bCanBeDestroyed = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction",
+		meta = (EditCondition = "bCanBeDestroyed", EditConditionHides))
+	float MinImpactForceToDamage = 600.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction",
+		meta = (EditCondition = "bCanBeDestroyed", EditConditionHides))
+	float CustomDamageMultiplier = 1.0f;
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Physics")
+	float CalculateMovementResistance(UPrimitiveComponent* MovingComponent);
+
+protected:
+	UFUNCTION()
+	virtual void HandleDeath();
+
+	UFUNCTION()
+	virtual void HandleStateApplied(FGameplayTag StateTag, float Intensity);
+
+	UFUNCTION()
+	virtual void OnHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
+
+public:
+	// ====================================================================
+	// 4. FUNKCJE INTERFEJSU C++
+	// ====================================================================
 	virtual void GrabObject_Implementation(AActor* Grabber) override;
 	virtual void ReleaseObject_Implementation() override;
-	virtual void SlamObject_Implementation(FVector PushDirection) override;
+	virtual void SlamObject_Implementation(FVector PushDirection, float PushForce) override;
 	virtual void MoveObject_Implementation(float AxisDelta) override;
 	virtual EInteractionType GetInteractionType_Implementation() override;
 	virtual EMouseAxis GetPreferredMouseAxis_Implementation() override;
@@ -69,5 +124,4 @@ public:
 	virtual bool IsLatched_Implementation() override;
 	virtual FGameplayTag GetPropSizeTag_Implementation() override;
 	virtual bool IsSmallProp_Implementation() override;
-	virtual float GetSlamForce_Implementation() override;
 };

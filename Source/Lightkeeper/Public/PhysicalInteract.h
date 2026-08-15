@@ -50,7 +50,7 @@ public:
 
 	// Funkcja Trzaśnięcia/Wyważenia (Z jakiego kierunku?)
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
-	void SlamObject(FVector PushDirection);
+	void SlamObject(FVector PushDirection, float PushForce);
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	void MoveObject(float AxisDelta);
@@ -79,7 +79,4 @@ public:
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	bool IsSmallProp();
-
-	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
-	float GetSlamForce();
 };

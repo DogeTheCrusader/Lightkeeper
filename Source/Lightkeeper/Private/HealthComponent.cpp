@@ -19,15 +19,31 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 	CurrentHealth = FMath::Clamp(CurrentHealth - DamageAmount, 0.0f, GetMaxHealth());
 	OnHealthChanged.Broadcast(CurrentHealth, GetMaxHealth());
 
-	// 1. ZWIĘKSZAMY PASEK PĘKNIĘCIA O +5% (0.05)
-	FractureMeter = FMath::Clamp(FractureMeter + FractureIncreasePerHit, 0.0f, 1.0f);
+	// ====================================================================
+	// TELEMETRIA HP (Pomarańczowy napis):
+	// ====================================================================
+	if (GEngine)
+	{
+		FString TypeStr = DamageTypeTag.IsValid() ? DamageTypeTag.ToString() : TEXT("Fizyczne");
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+			FString::Printf(TEXT("[HP] %s | OBRAŻENIA: -%.1f HP | POZOSTAŁO: %.1f / %.1f HP | TYP: %s"),
+				*GetOwner()->GetName(), DamageAmount, CurrentHealth, GetMaxHealth(), *TypeStr));
+	}
 
-	// 2. TEST RNG NA URAZ (Losowanie 0.0 - 1.0)
+	// Test Paska Pęknięcia
+	FractureMeter = FMath::Clamp(FractureMeter + FractureIncreasePerHit, 0.0f, 1.0f);
 	TestFractureInjury(DamageTypeTag);
 
-	// 3. ŚMIERĆ / OMDLENIE
+	// ====================================================================
+	// TELEMETRIA ŚMIERCI (Czerwony napis):
+	// ====================================================================
 	if (CurrentHealth <= 0.0f)
 	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Red,
+				FString::Printf(TEXT("[ZNISZCZENIE] %s ZOSTAŁ CAŁKOWICIE ZNISZCZONY!"), *GetOwner()->GetName()));
+		}
 		OnDeath.Broadcast();
 	}
 }
