@@ -37,21 +37,27 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 void UStaminaComponent::StartSprint()
 {
-	bWantsToSprint = true;
+	bWantsToSprint = true; // Zawsze pamiętamy wciśnięty Shift!
 
 	ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
 	if (!OwnerChar || !OwnerChar->GetCharacterMovement()) return;
 
-	if (OwnerChar->GetCharacterMovement()->IsFalling() && !bIsSprinting) return;
+	// Jeśli jesteśmy w locie, buforujemy zamiar (bWantsToSprint), ale nie zmieniamy prędkości w powietrzu:
+	if (OwnerChar->GetCharacterMovement()->IsFalling())
+	{
+		return;
+	}
 
-	// Blokada sprintu jeśli trzymany przedmiot waży więcej niż 5 kg:
+	// Blokada przy ciężkich przedmiotach (> 5kg):
 	if (UInteractionComponent* InterComp = OwnerChar->FindComponentByClass<UInteractionComponent>())
 	{
 		if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
 		{
 			if (HeldMesh->GetMass() > 5.0f)
 			{
-				return; // ZAKAZ SPRINTU Z CIĘŻKĄ SKRZYNIĄ!
+				bIsSprinting = false;
+				OwnerChar->UpdateMovementSpeed();
+				return;
 			}
 		}
 	}
@@ -59,7 +65,7 @@ void UStaminaComponent::StartSprint()
 	if (Stamina > 10.0f)
 	{
 		bIsSprinting = true;
-		OwnerChar->UpdateMovementSpeed(); // Postać sama ustawi prędkość SprintSpeed!
+		OwnerChar->UpdateMovementSpeed();
 	}
 }
 
@@ -70,14 +76,30 @@ void UStaminaComponent::StopSprint()
 
 	if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
 	{
-		OwnerChar->UpdateMovementSpeed(); // Postać sama przywróci prędkość WalkSpeed lub CrouchSpeed!
+		OwnerChar->UpdateMovementSpeed();
 	}
 }
 
 void UStaminaComponent::HandleLanded()
 {
-	if (bWantsToSprint && !bIsSprinting && Stamina > 10.0f)
+	// ====================================================================
+	// BEZPOŚREDNIA AKTYWACJA PO LĄDOWANIU (Brak blokady IsFalling!):
+	// ====================================================================
+	if (bWantsToSprint && Stamina > 10.0f)
 	{
-		StartSprint();
+		ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
+		if (!OwnerChar) return;
+
+		// Sprawdzamy czy nie trzymamy ciężkiej skrzyni:
+		if (UInteractionComponent* InterComp = OwnerChar->FindComponentByClass<UInteractionComponent>())
+		{
+			if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
+			{
+				if (HeldMesh->GetMass() > 5.0f) return;
+			}
+		}
+
+		bIsSprinting = true;
+		OwnerChar->UpdateMovementSpeed(); // Natychmiast odpala prędkość 900.0 w klatce lądowania!
 	}
 }

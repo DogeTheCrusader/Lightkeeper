@@ -1,5 +1,4 @@
-﻿#include "InteractionComponent.h"
-#include "BaseInteractable.h"
+#include "InteractionComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "Camera/CameraComponent.h"
@@ -226,16 +225,7 @@ bool UInteractionComponent::PerformLineTrace(FHitResult& OutHit)
 	const FVector End = Start + (ForwardVector * InteractionDistance);
 
 	FCollisionQueryParams TraceParams;
-	TraceParams.AddIgnoredActor(Owner); // Ignorujemy gracza
-
-	// ====================================================================
-	// KLUCZOWA POPRAWKA: IGNORUJEMY PRZEDMIOT TRZYMANY W DŁONIACH!
-	// (Promień przenika przez trzymany klucz i trafia w zamek drzwi za nim!)
-	// ====================================================================
-	if (GrabbedActor)
-	{
-		TraceParams.AddIgnoredActor(GrabbedActor);
-	}
+	TraceParams.AddIgnoredActor(Owner);
 
 	bool bHit = GetWorld()->LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, TraceParams);
 	if (bHit && OutHit.GetActor() && OutHit.GetActor()->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
@@ -271,22 +261,6 @@ void UInteractionComponent::StartInteraction()
 		{
 			if (IPhysicalInteract::Execute_IsLocked(HitActor))
 			{
-				// 1. Jeśli gracz trzyma aktualnie w dłoniach fizyczny przedmiot/klucz (GrabbedActor):
-				if (GrabbedActor)
-				{
-					if (ABaseInteractable* LockedDoor = Cast<ABaseInteractable>(HitActor))
-					{
-						// Próbujemy włożyć trzymany klucz do zamka:
-						if (LockedDoor->TryUnlockWithKey(GrabbedActor, Owner))
-						{
-							// Klucz pasował i otworzył zamek! Puszczamy uchwyt w dłoni:
-							StopInteraction();
-							return;
-						}
-					}
-				}
-
-				// 2. Jeśli mamy puste ręce -> sprawdzamy Pamięć Zamka i zapamiętany klucz w plecaku:
 				IPhysicalInteract::Execute_OnLockedInteraction(HitActor, Owner);
 				return;
 			}
@@ -685,70 +659,17 @@ void UInteractionComponent::ToggleInspectMode()
 	bIsInspecting = !bIsInspecting;
 }
 
-// ====================================================================
-// GŁÓWNA OBSŁUGA KLAWISZA [E] (Mózg Rąk Gracza)
-// ====================================================================
 void UInteractionComponent::TryPickupFocusedObject()
 {
 	FHitResult Hit;
-	bool bHit = PerformLineTrace(Hit);
-	AActor* HitActor = bHit ? Hit.GetActor() : nullptr;
 
-	// SCENARIUSZ A: Trzymamy klucz i celujemy w Drzwi/Szufladę z zamkiem -> Używamy klucza!
-	if (GrabbedActor && HitActor)
+	// Odpalamy Twój hybrydowy skan z oczu gracza:
+	if (PerformLineTrace(Hit))
 	{
-		if (ABaseInteractable* TargetDoor = Cast<ABaseInteractable>(HitActor))
+		if (AActor* HitActor = Hit.GetActor())
 		{
-			if (TargetDoor->RequiredKeyTag.IsValid())
-			{
-				if (TargetDoor->TryUnlockWithKey(GrabbedActor, GetOwner()))
-				{
-					StopInteraction(); // Puszczamy użyty klucz
-					return;
-				}
-			}
-		}
-	}
-
-	// SCENARIUSZ B: Trzymamy mały przedmiot w dłoni i wciskamy [E] w przestrzeń -> Chowamy do plecaka
-	if (GrabbedActor)
-	{
-		if (GrabbedActor->Implements<UPhysicalInteract>())
-		{
-			// Puszczamy chwyt TYLKO jeśli przedmiot faktycznie zmieści się w kieszeni:
-			if (IPhysicalInteract::Execute_CanBePocketed(GrabbedActor))
-			{
-				AActor* ActorToPocket = GrabbedActor;
-				StopInteraction();
-				IPhysicalInteract::Execute_PickupObject(ActorToPocket, GetOwner());
-				return;
-			}
-		}
-
-		// Ciężkie skrzynie lub klamki ignorują [E] (nie puszczają chwytu):
-		return;
-	}
-
-	// SCENARIUSZ C: Puste ręce -> Zwykłe podniesienie do plecaka LUB ryglowanie drzwi/szuflad z plecaka
-	if (HitActor)
-	{
-		IPhysicalInteract::Execute_PickupObject(HitActor, GetOwner());
-	}
-}
-
-void UInteractionComponent::TryQuickConsumeFocusedObject()
-{
-	FHitResult Hit;
-
-	// Odpalamy skan z oczu gracza:
-	if (PerformLineTrace(Hit) && Hit.GetActor())
-	{
-		AActor* HitActor = Hit.GetActor();
-
-		// Jeśli obiekt implementuje nasz interfejs -> każemy mu się skonsumować!
-		if (HitActor->Implements<UPhysicalInteract>())
-		{
-			IPhysicalInteract::Execute_ConsumeObject(HitActor, GetOwner());
+			// Wysyłamy sygnał [E] bezpośrednio do trafionego obiektu!
+			IPhysicalInteract::Execute_PickupObject(HitActor, GetOwner());
 		}
 	}
 }

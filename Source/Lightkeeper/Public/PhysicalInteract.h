@@ -79,4 +79,14 @@ public:
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	bool IsSmallProp();
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	bool CanBePocketed();
+
+	// Szybka akcja pod klawiszem [E] (Podniesienie do kieszeni, wciśnięcie guzika)
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	void PickupObject(AActor* InstigatorActor);
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	bool ConsumeObject(AActor* InstigatorActor);
 };

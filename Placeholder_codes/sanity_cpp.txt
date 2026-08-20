@@ -1,0 +1,197 @@
+#include "SanityComponent.h"
+#include "Engine/Engine.h"
+
+USanityComponent::USanityComponent()
+{
+	PrimaryComponentTick.bCanEverTick = true;
+}
+
+void USanityComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	CurrentSanity = GetMaxSanity();
+	LowestSanityPercentInDarkness = 1.0f;
+	MentalCollapseCount = 0;
+}
+
+void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	// ====================================================================
+	// 1. W MROKU: Nieliniowy spadek i rejestrowanie głębokości paniki
+	// ====================================================================
+	if (bIsInDarkness)
+	{
+		TimeInDarkness += DeltaTime;
+
+		// Wykładniczy wzór strachu
+		float CurrentDrain = BaseDarknessDrainRate * (1.0f + (TimeInDarkness * DarknessAccelerationFactor));
+		if (bHasMinorMadness)
+		{
+			CurrentDrain *= MinorMadnessDrainMultiplier;
+		}
+
+		CurrentSanity = FMath::Clamp(CurrentSanity - (CurrentDrain * DeltaTime), 0.0f, GetMaxSanity());
+		OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+
+		// Zapisujemy jak nisko upadła psychika gracza w mroku (dla dynamicznego sufitu leczenia):
+		float CurrentSanityPercent = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
+		LowestSanityPercentInDarkness = FMath::Min(LowestSanityPercentInDarkness, CurrentSanityPercent);
+
+		// Losowy test na Minor Madness przy spadku poniżej 40%:
+		if (!bHasMinorMadness && CurrentSanityPercent < 0.40f)
+		{
+			if (FMath::FRandRange(0.0f, 100.0f) < 2.0f)
+			{
+				TriggerRandomMinorMadness();
+			}
+		}
+
+		// Uwaga: W ciemności przy 0 Sanity NIE leczymy i NIE odpalamy natychmiastowego Bout.
+		// Gracz musi doczołgać się do światła, by nastąpiło przebudzenie i zapaść!
+	}
+	// ====================================================================
+	// 2. W ŚWIETLE: Dynamiczna regeneracja (Prędkość i Sufit zależą od traumy!)
+	// ====================================================================
+	else
+	{
+		// Jeśli gracz wszedł w światło z zerowym Sanity -> ODPALAMY PRZEBUDZENIE I ZAPAŚĆ!
+		if (CurrentSanity <= 0.0f && MentalCollapseCount < 3)
+		{
+			HandleSanityDepleted();
+		}
+
+		TimeInDarkness = 0.0f; // Reset licznika strachu
+
+		// Obliczamy dynamiczny sufit (np. jeśli spadliśmy do 20%, światło uleczy nas tylko do 50%):
+		float DynamicCap = GetCurrentDynamicComfortCap();
+
+		if (CurrentSanity < DynamicCap)
+		{
+			// DYNAMICZNA PRĘDKOŚĆ: Im niższe Sanity, tym ciężej i wolniej się leczy!
+			float SanityRatio = FMath::Clamp(CurrentSanity / FMath::Max(1.0f, GetMaxSanity()), 0.20f, 1.0f);
+			float CurrentRecoverySpeed = BaseLightRecoveryRate * SanityRatio;
+
+			CurrentSanity = FMath::FInterpConstantTo(CurrentSanity, DynamicCap, DeltaTime, CurrentRecoverySpeed);
+			OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+		}
+	}
+}
+
+float USanityComponent::GetCurrentDynamicComfortCap() const
+{
+	// Sufit = Najniższy punkt paniki + Okno darmowego ukojenia (np. +30%)
+	float CapPercent = FMath::Clamp(LowestSanityPercentInDarkness + PassiveRecoveryWindowPercent, 0.35f, 1.0f);
+	return GetMaxSanity() * CapPercent;
+}
+
+void USanityComponent::TakeSanityDamage(float DamageAmount, FGameplayTag ShockTag)
+{
+	if (DamageAmount <= 0.0f) return;
+
+	float FinalDamage = bHasMinorMadness ? (DamageAmount * MinorMadnessDrainMultiplier) : DamageAmount;
+	CurrentSanity = FMath::Clamp(CurrentSanity - FinalDamage, 0.0f, GetMaxSanity());
+	
+	// Aktualizujemy najniższy punkt traumy:
+	float CurrentSanityPercent = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
+	LowestSanityPercentInDarkness = FMath::Min(LowestSanityPercentInDarkness, CurrentSanityPercent);
+
+	OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Purple,
+			FString::Printf(TEXT("[SZOK PSYCHICZNY] -%.1f Sanity | Pozostało: %.1f / %.1f"), FinalDamage, CurrentSanity, GetMaxSanity()));
+	}
+
+	if (FinalDamage > 15.0f && !bHasMinorMadness)
+	{
+		TriggerRandomMinorMadness();
+	}
+}
+
+void USanityComponent::RestoreSanity(float RestoreAmount)
+{
+	if (RestoreAmount <= 0.0f) return;
+
+	CurrentSanity = FMath::Clamp(CurrentSanity + RestoreAmount, 0.0f, GetMaxSanity());
+	
+	// MEDYCYNA WIKTORIAŃSKA: Leki resetują pamięć traumy, pozwalając na pełne wyleczenie!
+	LowestSanityPercentInDarkness = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
+	bHasMinorMadness = false; // Leki uciszają drobne szaleństwo
+
+	OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+}
+
+void USanityComponent::SetInDarkness(bool bNewInDarkness)
+{
+	bIsInDarkness = bNewInDarkness;
+	if (!bIsInDarkness)
+	{
+		TimeInDarkness = 0.0f;
+	}
+}
+
+// ====================================================================
+// SYSTEM ZAPAŚCI I FAIL FORWARD
+// ====================================================================
+void USanityComponent::HandleSanityDepleted()
+{
+	MentalCollapseCount++;
+
+	// 1. Zapaść Psychiczna (Cap na 75% Max Sanity)
+	if (MentalCollapseCount == 1)
+	{
+		MaxSanityCapMultiplier = 0.75f;
+		LowestSanityPercentInDarkness = 0.40f; // Resetujemy lekko traumę do nowego poziomu
+		CurrentSanity = GetMaxSanity() * 0.40f;
+		TriggerMajorBoutOfMadness();
+		OnPsychologicalCollapse.Broadcast(1);
+	}
+	// 2. Zapaść Psychiczna (Cap na 50% Max Sanity + Eskalacja)
+	else if (MentalCollapseCount == 2)
+	{
+		MaxSanityCapMultiplier = 0.50f;
+		LowestSanityPercentInDarkness = 0.35f;
+		CurrentSanity = GetMaxSanity() * 0.35f;
+		TriggerMajorBoutOfMadness();
+		OnPsychologicalCollapse.Broadcast(2);
+	}
+	// 3. Ostateczne Załamanie -> KONIEC NOCY!
+	else if (MentalCollapseCount >= 3)
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("[KONIEC NOCY] Ostateczne Załamanie Psychiczne! Przebudzenie w Hubie rano."));
+		}
+		OnTotalMentalBreakdown.Broadcast();
+	}
+
+	OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+}
+
+void USanityComponent::TriggerRandomMinorMadness()
+{
+	bHasMinorMadness = true;
+	FGameplayTag MinorTag = FGameplayTag::RequestGameplayTag(FName("Status.Madness.Minor.Whispers"), false);
+	OnMinorMadnessTriggered.Broadcast(MinorTag);
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Magenta, TEXT("[DROBNE SZALEŃSTWO] Szepty w mroku! Sanity spada 1.5x szybciej!"));
+	}
+}
+
+void USanityComponent::TriggerMajorBoutOfMadness()
+{
+	FGameplayTag BoutTag = FGameplayTag::RequestGameplayTag(FName("Status.Madness.Major.Scotophobia"), false);
+	ActiveMadnessTags.AddTag(BoutTag);
+	OnBoutOfMadnessTriggered.Broadcast(BoutTag);
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Red, 
+			FString::Printf(TEXT("[BOUT OF MADNESS #%d] Otrzymano: %s | Limit Sanity trwale obcięty!"), MentalCollapseCount, *BoutTag.ToString()));
+	}
+}
