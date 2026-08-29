@@ -1,5 +1,6 @@
 ﻿#include "InteractionComponent.h"
 #include "BaseInteractable.h"
+#include "ProgressionComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "Camera/CameraComponent.h"
@@ -9,6 +10,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "LightkeeperCharacter.h"
+#include "ToolManagerComponent.h"
 
 UInteractionComponent::UInteractionComponent()
 {
@@ -102,99 +104,61 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	// 2. Fizyka trzymania
 	if (bHolding && HoldSlotComponent && PhysicsHandle)
 	{
+		APlayerCameraManager* CamMgr = GetCameraManager();
+		const FVector OwnerLoc = Owner->GetActorLocation();
+		const FVector CameraLoc = CamMgr ? CamMgr->GetCameraLocation() : OwnerLoc;
+		const FVector CameraForward = CamMgr ? CamMgr->GetCameraRotation().Vector() : Owner->GetActorForwardVector();
+
 		if (HeldType == EInteractionType::Grab_Free)
 		{
 			if (UPrimitiveComponent* GrabbedComp = PhysicsHandle->GetGrabbedComponent())
 			{
-				const FVector OwnerLoc = Owner->GetActorLocation();
-				APlayerCameraManager* CamMgr = GetCameraManager();
-				const FVector CameraLoc = CamMgr ? CamMgr->GetCameraLocation() : OwnerLoc;
-				const FVector CameraForward = CamMgr ? CamMgr->GetCameraRotation().Vector() : Owner->GetActorForwardVector();
+				const float ObjectRadius = GrabbedComp->Bounds.SphereRadius;
 
-				// Sprawdzamy czy fizyczny obiekt nie został daleko w tyle za ścianą
-				FVector CurrentTargetLoc = HoldSlotComponent->GetComponentLocation();
+				// Zwiększony bufor zerwania, aby gwałtowne ruchy myszą nie powodowały upuszczenia
+				const float DynamicMaxLag = ObjectRadius + BreakDistanceBuffer + 80.0f;
+				const float LagDistSq = FVector::DistSquared(GrabbedComp->GetComponentLocation(), SmoothedHoldLocation);
 
-				const float LagDistSq = FVector::DistSquared(GrabbedComp->GetComponentLocation(), CurrentTargetLoc);
-				const float CurrentZoomOffset = HoldSlotComponent->GetRelativeLocation().X;
-				const float MaxAllowedLag = BreakDistanceBuffer + 150.0f + (CurrentZoomOffset * 0.3f);
-
-				if (LagDistSq > (MaxAllowedLag * MaxAllowedLag))
+				if (LagDistSq > (DynamicMaxLag * DynamicMaxLag))
 				{
-					StopInteraction();
-					return;
+					// Dłuższy czas (0.75s) – puszczamy tylko przy rzeczywistym zablokowaniu za przeszkodą
+					ObstacleLagTimer += DeltaTime;
+					if (ObstacleLagTimer > 0.75f)
+					{
+						StopInteraction();
+						ObstacleLagTimer = 0.0f;
+						return;
+					}
+				}
+				else
+				{
+					ObstacleLagTimer = FMath::Max(0.0f, ObstacleLagTimer - (DeltaTime * 3.0f));
 				}
 
 				ACharacter* Char = Cast<ACharacter>(Owner);
 				const float CapsuleRadius = Char && Char->GetCapsuleComponent() ? Char->GetCapsuleComponent()->GetScaledCapsuleRadius() : 45.0f;
-				const float CapsuleHalfHeight = Char && Char->GetCapsuleComponent() ? Char->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.0f;
-				const float ObjectRadius = GrabbedComp->Bounds.SphereRadius;
 
-				// ====================================================================
-				// 1. DYNAMICZNY AUTO-ZOOM (Gładkie skracanie dystansu przed meblami/ścianami)
-				// ====================================================================
+				// Minimalny dystans trzymania, uniemożliwiający wejście obiektu w gracza
 				float DesiredForwardDistance = HoldSlotComponent->GetRelativeLocation().X;
+				const float MinSafeDist = CapsuleRadius + (ObjectRadius * 0.6f) + 15.0f;
+				DesiredForwardDistance = FMath::Max(DesiredForwardDistance, MinSafeDist);
 
-				FHitResult SurfaceHit;
-				FCollisionQueryParams SweepParams;
-				SweepParams.AddIgnoredActor(Owner);
-				SweepParams.AddIgnoredActor(GrabbedActor);
-
-				const float ProbeRadius = FMath::Clamp(ObjectRadius * 0.35f, 6.0f, 20.0f);
-				const FVector TraceEnd = CameraLoc + (CameraForward * (CurrentBaseHoldDistance + 10.0f));
-
-				if (GetWorld()->SweepSingleByChannel(SurfaceHit, CameraLoc, TraceEnd, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(ProbeRadius), SweepParams))
-				{
-					const float ObstacleDist = FMath::Max(SurfaceHit.Distance - (ObjectRadius * 0.45f), CapsuleRadius + (ObjectRadius * 0.5f));
-
-					// KLUCZOWA POPRAWKA (FMath::Min):
-					// Szafka może skrócić zasięg wyciągniętych rąk, ale NIGDY nie wyrwie przedmiotu, 
-					// który gracz sam przyciągnął blisko swojej klatki piersiowej!
-					DesiredForwardDistance = FMath::Min(DesiredForwardDistance, ObstacleDist);
-				}
-
-				// Płynna interpolacja dystansu (eliminuje jakiekolwiek skoki i szarpnięcia):
-				const float InterpSpeed = (DesiredForwardDistance < SmoothedHoldDistance) ? 20.0f : 7.0f;
-				SmoothedHoldDistance = FMath::FInterpTo(SmoothedHoldDistance, DesiredForwardDistance, DeltaTime, InterpSpeed);
-
+				// Płynna interpolacja dystansu i pozycji docelowej
+				SmoothedHoldDistance = FMath::FInterpTo(SmoothedHoldDistance, DesiredForwardDistance, DeltaTime, 15.0f);
 				FVector DesiredHoldLoc = CameraLoc + (CameraForward * SmoothedHoldDistance);
 
-				// ====================================================================
-				// 2. TWARDY BUFOR STÓP/BRZUCHA (Aktywny TYLKO gdy patrzymy w dół / przed siebie)
-				// ====================================================================
-				const bool bIsLookingBelowHead = DesiredHoldLoc.Z < (CameraLoc.Z + 10.0f);
+				SmoothedHoldLocation = FMath::VInterpTo(SmoothedHoldLocation, DesiredHoldLoc, DeltaTime, 25.0f);
 
-				if (bIsLookingBelowHead)
+				// ====================================================================
+				// TŁUMIK WIROWANIA PRZY KOLIZJACH (BLOKADA SKRĘCANIA W RĘKACH):
+				// ====================================================================
+				FVector AngularVel = GrabbedComp->GetPhysicsAngularVelocityInDegrees();
+				const float MaxAngularSpeedDeg = 60.0f;
+				if (AngularVel.SizeSquared() > (MaxAngularSpeedDeg * MaxAngularSpeedDeg))
 				{
-					const float MinKeepOutDist = CapsuleRadius + ObjectRadius + 12.0f;
-					FVector2D PlayerXY(OwnerLoc.X, OwnerLoc.Y);
-					FVector2D TargetXY(DesiredHoldLoc.X, DesiredHoldLoc.Y);
-					const float CurrentDistXY = FVector2D::Distance(PlayerXY, TargetXY);
-
-					if (CurrentDistXY < MinKeepOutDist)
-					{
-						FVector ForwardXY = Owner->GetActorForwardVector();
-						ForwardXY.Z = 0.0f;
-						ForwardXY = ForwardXY.GetSafeNormal();
-
-						FVector SafeXY = OwnerLoc + (ForwardXY * MinKeepOutDist);
-						DesiredHoldLoc.X = SafeXY.X;
-						DesiredHoldLoc.Y = SafeXY.Y;
-					}
-
-					// Płynna blokada wbijania w podłogę pod butami bez nagłych przeskoków
-					const float FloorLevel = (OwnerLoc.Z - CapsuleHalfHeight) + (GrabbedComp->Bounds.BoxExtent.Z) - 10.0f;
-					if (DesiredHoldLoc.Z < FloorLevel)
-					{
-						DesiredHoldLoc.Z = FMath::FInterpTo(DesiredHoldLoc.Z, FloorLevel, DeltaTime, 25.0f);
-					}
+					GrabbedComp->SetPhysicsAngularVelocityInDegrees(AngularVel.GetClampedToMaxSize(MaxAngularSpeedDeg));
 				}
 
-				// ====================================================================
-				// 3. PŁYNNE WYGŁADZANJE POZYCJI KOŃCOWEJ (Zabezpieczenie przed szarpnięciami)
-				// ====================================================================
-				SmoothedHoldLocation = FMath::VInterpTo(SmoothedHoldLocation, DesiredHoldLoc, DeltaTime, 20.0f);
-
-				// Aplikujemy rotację i wygładzoną pozycję do PhysicsHandle
 				FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * InitialGrabQuat;
 				TargetQuat.Normalize();
 				PhysicsHandle->SetTargetLocationAndRotation(SmoothedHoldLocation, TargetQuat.Rotator());
@@ -202,10 +166,10 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 		}
 		else
 		{
-			// Drzwi / Mebel
+			// Drzwi / Mebel – sprawdzamy dystans względem kamery, nie stóp gracza
 			const FVector TargetLocation = GrabbedComponent ? GrabbedComponent->GetComponentLocation() : GrabbedActor->GetActorLocation();
-			const float MaxAllowedDistance = InteractionDistance + BreakDistanceBuffer;
-			if (FVector::DistSquared(Owner->GetActorLocation(), TargetLocation) > (MaxAllowedDistance * MaxAllowedDistance))
+			const float MaxAllowedDistance = InteractionDistance + BreakDistanceBuffer + 30.0f;
+			if (FVector::DistSquared(CameraLoc, TargetLocation) > (MaxAllowedDistance * MaxAllowedDistance))
 			{
 				StopInteraction();
 			}
@@ -226,12 +190,8 @@ bool UInteractionComponent::PerformLineTrace(FHitResult& OutHit)
 	const FVector End = Start + (ForwardVector * InteractionDistance);
 
 	FCollisionQueryParams TraceParams;
-	TraceParams.AddIgnoredActor(Owner); // Ignorujemy gracza
+	TraceParams.AddIgnoredActor(Owner);
 
-	// ====================================================================
-	// KLUCZOWA POPRAWKA: IGNORUJEMY PRZEDMIOT TRZYMANY W DŁONIACH!
-	// (Promień przenika przez trzymany klucz i trafia w zamek drzwi za nim!)
-	// ====================================================================
 	if (GrabbedActor)
 	{
 		TraceParams.AddIgnoredActor(GrabbedActor);
@@ -262,6 +222,14 @@ void UInteractionComponent::StartInteraction()
 	AActor* Owner = GetOwner();
 	if (!Owner) return;
 
+	if (UToolManagerComponent* ToolMgr = Owner->FindComponentByClass<UToolManagerComponent>())
+	{
+		if (ToolMgr->IsAiming())
+		{
+			return;
+		}
+	}
+
 	FHitResult HitResult;
 	if (PerformLineTrace(HitResult) && HitResult.GetActor())
 	{
@@ -271,123 +239,170 @@ void UInteractionComponent::StartInteraction()
 		{
 			if (IPhysicalInteract::Execute_IsLocked(HitActor))
 			{
-				// 1. Jeśli gracz trzyma aktualnie w dłoniach fizyczny przedmiot/klucz (GrabbedActor):
-				if (GrabbedActor)
-				{
-					if (ABaseInteractable* LockedDoor = Cast<ABaseInteractable>(HitActor))
-					{
-						// Próbujemy włożyć trzymany klucz do zamka:
-						if (LockedDoor->TryUnlockWithKey(GrabbedActor, Owner))
-						{
-							// Klucz pasował i otworzył zamek! Puszczamy uchwyt w dłoni:
-							StopInteraction();
-							return;
-						}
-					}
-				}
-
-				// 2. Jeśli mamy puste ręce -> sprawdzamy Pamięć Zamka i zapamiętany klucz w plecaku:
+				// [LPM] Odpala Twój ORYGINALNY EFEKT w BP_BaseDoor:
 				IPhysicalInteract::Execute_OnLockedInteraction(HitActor, Owner);
-				return;
+				return; // Nie chwyta klamki!
 			}
 
-			GrabbedActor = HitActor;
-			GrabbedComponent = Cast<UPrimitiveComponent>(HitResult.GetComponent());
-
-			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
+			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(HitActor);
 
 			switch (Type)
 			{
 			case EInteractionType::Hinge:
 			case EInteractionType::Translation:
 			case EInteractionType::Crank:
+				GrabbedActor = HitActor;
+				GrabbedComponent = Cast<UPrimitiveComponent>(HitResult.GetComponent());
 				IPhysicalInteract::Execute_GrabObject(GrabbedActor, Owner);
 				break;
 
 			case EInteractionType::Grab_Free:
+			{
+				UPrimitiveComponent* MeshToGrab = Cast<UPrimitiveComponent>(HitResult.GetComponent());
+				if (!MeshToGrab || !HoldSlotComponent) return;
+
+				// ====================================================================
+				// 1. CZYSTA WERYFIKACJA WIGORU (ZERO RZUTOWANIA NA GRACZA!):
+				// Pobieramy Tag gabarytu przez Interfejs!
+				// ====================================================================
+				FGameplayTag PropSize = IPhysicalInteract::Execute_GetPropSizeTag(HitActor);
+				static const FGameplayTag HeavyPropTag = FGameplayTag::RequestGameplayTag(FName("Prop.Size.Heavy"), false);
+
+				if (PropSize.MatchesTag(HeavyPropTag))
+				{
+					bool bCanLiftHeavy = false;
+					// Pytamy tylko, czy nasz Owner posiada komponent progresji:
+					if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+					{
+						static const FGameplayTag HeavyLifterTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.HeavyLifter"), false);
+						bCanLiftHeavy = ProgComp->HasPerk(HeavyLifterTag);
+					}
+
+					// Jeśli nie ma Perka (lub w ogóle nie ma systemu progresji) -> ODRZUCAMY CHWYT!
+					if (!bCanLiftHeavy)
+					{
+#if !UE_BUILD_SHIPPING
+						if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red, TEXT("❌ [WIGOR] Barykada jest zbyt ciężka! Wymaga Perka: Dźwigar."));
+#endif
+						return; // CAŁKOWITE PRZERWANIE FUNKCJI! PhysicsHandle nie dotknie obiektu!
+					}
+				}
+
+				GrabbedActor = HitActor;
+				GrabbedComponent = MeshToGrab;
+
 				IPhysicalInteract::Execute_GrabObject(GrabbedActor, Owner);
 
 				if (PhysicsHandle)
 				{
-					UPrimitiveComponent* MeshToGrab = Cast<UPrimitiveComponent>(HitResult.GetComponent());
-					if (MeshToGrab && HoldSlotComponent)
+					if (!GrabbedComponent->IsSimulatingPhysics())
 					{
-						GrabbedComponent = MeshToGrab;
-
-						// Natychmiastowe uspokojenie obiektów w szafkach przed chwytem (zapobiega wystrzeleniu):
-						GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
-						GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
-
-						OriginalPawnResponse = GrabbedComponent->GetCollisionResponseToChannel(ECC_Pawn);
-						GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-						GrabbedComponent->IgnoreActorWhenMoving(Owner, true);
-
-						if (ACharacter* Char = Cast<ACharacter>(Owner))
-						{
-							if (Char->GetCapsuleComponent())
-							{
-								Char->GetCapsuleComponent()->IgnoreActorWhenMoving(GrabbedActor, true);
-								GrabbedComponent->IgnoreComponentWhenMoving(Char->GetCapsuleComponent(), true);
-							}
-							if (Char->GetMesh())
-							{
-								GrabbedComponent->IgnoreComponentWhenMoving(Char->GetMesh(), true);
-							}
-						}
-
-						const float ObjectRadius = GrabbedComponent->Bounds.SphereRadius;
-						CurrentBaseHoldDistance = FMath::Clamp(85.0f + ObjectRadius, 120.0f, 300.0f);
-						SmoothedHoldDistance = CurrentBaseHoldDistance;
-
-						FVector InitLoc = InitialHoldSlotLocation;
-						InitLoc.X = CurrentBaseHoldDistance;
-						HoldSlotComponent->SetRelativeLocation(InitLoc);
-
-						// Inicjalizacja wygładzonej pozycji od razu na miejscu obiektu (zero przeskoków):
-						SmoothedHoldLocation = GrabbedComponent->GetComponentLocation();
-
-						float PropMass = GrabbedComponent->GetMass();
-						if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(Owner))
-						{
-							if (PropMass > 5.0f)
-							{
-								if (UStaminaComponent* Stamina = Char->FindComponentByClass<UStaminaComponent>())
-								{
-									Stamina->StopSprint();
-								}
-							}
-
-							Char->UpdateMovementSpeed();
-
-							if (Char->GetCharacterMovement() && Char->GetCharacterMovement()->CurrentFloor.HitResult.GetActor() == GrabbedActor)
-							{
-								Char->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
-							}
-						}
-
-						FVector CenterOfMesh = GrabbedComponent->Bounds.Origin;
-						FTransform HoldSlotTransform = HoldSlotComponent->GetComponentTransform();
-						FTransform MeshTransform = GrabbedComponent->GetComponentTransform();
-
-						InitialGrabQuat = HoldSlotTransform.GetRotation().Inverse() * MeshTransform.GetRotation();
-
-						PhysicsHandle->GrabComponentAtLocationWithRotation(
-							GrabbedComponent,
-							NAME_None,
-							CenterOfMesh,
-							GrabbedComponent->GetComponentRotation()
-						);
+						GrabbedComponent->SetSimulatePhysics(true);
 					}
+
+					GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
+					GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+
+					OriginalPawnResponse = GrabbedComponent->GetCollisionResponseToChannel(ECC_Pawn);
+					GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+					GrabbedComponent->IgnoreActorWhenMoving(Owner, true);
+
+					// ====================================================================
+					// 2. IGNOROWANIE KAPSUŁY (BEZ CASTOWANIA NA ACharacter!):
+					// ====================================================================
+					if (UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>())
+					{
+						Capsule->IgnoreActorWhenMoving(GrabbedActor, true);
+						GrabbedComponent->IgnoreComponentWhenMoving(Capsule, true);
+					}
+
+					const float ObjectRadius = GrabbedComponent->Bounds.SphereRadius;
+					CurrentBaseHoldDistance = FMath::Clamp(75.0f + ObjectRadius, 90.0f, 300.0f);
+					SmoothedHoldDistance = CurrentBaseHoldDistance;
+
+					FVector InitLoc = InitialHoldSlotLocation;
+					InitLoc.X = CurrentBaseHoldDistance;
+					HoldSlotComponent->SetRelativeLocation(InitLoc);
+
+					SmoothedHoldLocation = GrabbedComponent->GetComponentLocation();
+
+					// (Tutaj zostaje jedyny wymuszony cast na ALightkeeperCharacter dla UpdateMovementSpeed, 
+					//  ponieważ to w 100% unikalna funkcja klasy gracza)
+					if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(Owner))
+					{
+						Char->UpdateMovementSpeed();
+						if (Char->GetCharacterMovement() && Char->GetCharacterMovement()->CurrentFloor.HitResult.GetActor() == GrabbedActor)
+						{
+							Char->GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+						}
+					}
+
+					FVector CenterOfMesh = GrabbedComponent->Bounds.Origin;
+					FTransform HoldSlotTransform = HoldSlotComponent->GetComponentTransform();
+					FTransform MeshTransform = GrabbedComponent->GetComponentTransform();
+
+					InitialGrabQuat = HoldSlotTransform.GetRotation().Inverse() * MeshTransform.GetRotation();
+
+					GrabbedComponent->SetLinearDamping(1.5f);
+					GrabbedComponent->SetAngularDamping(25.0f);
+
+					const float ActualMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
+					const float MassFactor = FMath::Clamp(1.0f - (ActualMass / 150.0f), 0.35f, 1.0f);
+
+					PhysicsHandle->LinearStiffness = 1500.0f * MassFactor;
+					PhysicsHandle->LinearDamping = 35.0f * MassFactor;
+
+					PhysicsHandle->AngularStiffness = 2500.0f;
+					PhysicsHandle->AngularDamping = 180.0f;
+					PhysicsHandle->InterpolationSpeed = 50.0f;
+
+					PhysicsHandle->GrabComponentAtLocationWithRotation(
+						GrabbedComponent,
+						NAME_None,
+						CenterOfMesh,
+						GrabbedComponent->GetComponentRotation()
+					);
 				}
 				break;
+			}
 
 			case EInteractionType::Bolt:
+				GrabbedActor = HitActor;
+				GrabbedComponent = Cast<UPrimitiveComponent>(HitResult.GetComponent());
 				IPhysicalInteract::Execute_GrabObject(GrabbedActor, Owner);
 				StopInteraction();
 				break;
 			}
 		}
 	}
+}
+
+FVector UInteractionComponent::CalculateThrowVelocity(const FVector& Direction, float ObjectMass, float ChargeMultiplier) const
+{
+	float SafeMass = FMath::Max(1.0f, ObjectMass);
+
+	// ====================================================================
+	// UJEDNOLICONA PRĘDKOŚĆ RZUTU: 
+	// Lekki przedmiot (1kg) = 950 cm/s, Średnia skrzynia (20kg) = 750 cm/s, Ciężka (100kg) = 500 cm/s
+	// ====================================================================
+	float MassFactor = FMath::Clamp(1.0f - (FMath::Sqrt(SafeMass) / 25.0f), 0.45f, 1.2f);
+
+	float ThrowMod = 1.0f;
+	if (AActor* Owner = GetOwner())
+	{
+		if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+		{
+			ThrowMod = Health->GetThrowPowerMultiplier();
+		}
+	}
+
+	// Bazowa siła rzutu = 850 cm/s:
+	float FinalPower = (850.0f * ChargeMultiplier * ThrowMod) * MassFactor;
+
+	FVector FinalThrowVelocity = Direction.GetSafeNormal() * FinalPower;
+	FinalThrowVelocity.Z += 40.0f;
+
+	return FinalThrowVelocity;
 }
 
 void UInteractionComponent::StopInteraction()
@@ -398,27 +413,26 @@ void UInteractionComponent::StopInteraction()
 
 		if (GrabbedComponent)
 		{
+			GrabbedComponent->SetLinearDamping(0.01f);
+			GrabbedComponent->SetAngularDamping(0.0f);
+
 			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
 			if (Type == EInteractionType::Grab_Free)
 			{
-				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
+				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+				GrabbedComponent->IgnoreActorWhenMoving(Owner, false);
 
-				if (ACharacter* Char = Cast<ACharacter>(Owner))
+				// ====================================================================
+				// CZYSTE PRZYWRÓCENIE KOLIZJI (BEZ CASTOWANIA):
+				// ====================================================================
+				if (UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>())
 				{
-					if (Char->GetCapsuleComponent())
-					{
-						Char->GetCapsuleComponent()->IgnoreActorWhenMoving(GrabbedActor, false);
-					}
-
-					FVector DropNudge = Owner->GetActorForwardVector() * 35.0f;
-					DropNudge.Z = -10.0f;
-					GrabbedComponent->SetPhysicsLinearVelocity(DropNudge);
-				}
-				else
-				{
-					GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
+					Capsule->IgnoreActorWhenMoving(GrabbedActor, false);
 				}
 
+				FVector DropNudge = Owner->GetActorForwardVector() * 35.0f;
+				DropNudge.Z = -10.0f;
+				GrabbedComponent->SetPhysicsLinearVelocity(DropNudge);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 			}
 			GrabbedComponent = nullptr;
@@ -435,7 +449,7 @@ void UInteractionComponent::StopInteraction()
 	}
 }
 
-void UInteractionComponent::SlamInteraction()
+void UInteractionComponent::SlamInteraction(float CustomMultiplier)
 {
 	AActor* Owner = GetOwner();
 	if (!Owner) return;
@@ -468,44 +482,98 @@ void UInteractionComponent::SlamInteraction()
 
 			if (GrabbedComponent)
 			{
+				GrabbedComponent->SetLinearDamping(0.05f);
+				GrabbedComponent->SetAngularDamping(0.1f);
+
 				GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
 
-				float ObjectMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
-				float MassSpeedMultiplier = FMath::Clamp(1.5f / FMath::Sqrt(ObjectMass), 0.1f, 1.4f);
+				float ObjectMass = (GrabbedComponent && GrabbedComponent->IsSimulatingPhysics()) ? FMath::Max(1.0f, GrabbedComponent->GetMass()) : 15.0f;
 
-				FVector FinalThrowVelocity = Forward * (BaseThrowPower * MassSpeedMultiplier);
-				FinalThrowVelocity.Z += 60.0f;
+				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+				GrabbedComponent->IgnoreActorWhenMoving(Owner, false);
 
-				if (ACharacter* OwnerChar = Cast<ACharacter>(Owner))
+				// ====================================================================
+				// CZYSTE ODPYTYWANIE KOMPONENTÓW (BEZ CASTOWANIA):
+				// ====================================================================
+				if (UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>())
 				{
-					FinalThrowVelocity += OwnerChar->GetVelocity();
+					Capsule->IgnoreActorWhenMoving(GrabbedActor, false);
 				}
 
+				if (UStaminaComponent* StaminaComp = Owner->FindComponentByClass<UStaminaComponent>())
+				{
+					float StaminaCost = FMath::Clamp((5.0f + (ObjectMass * 0.9f)) * CustomMultiplier, 5.0f, 60.0f);
+					StaminaComp->TryConsumeStamina(StaminaCost);
+				}
+
+				FVector FinalThrowVelocity = CalculateThrowVelocity(Forward, ObjectMass, CustomMultiplier);
 				GrabbedComponent->AddImpulse(FinalThrowVelocity, NAME_None, true);
-
-				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, OriginalPawnResponse);
-				if (ACharacter* Char = Cast<ACharacter>(Owner))
-				{
-					if (Char->GetCapsuleComponent())
-					{
-						Char->GetCapsuleComponent()->IgnoreActorWhenMoving(GrabbedActor, false);
-					}
-				}
 
 				GrabbedComponent = nullptr;
 			}
 
-			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower);
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower * CustomMultiplier);
 		}
 		else
 		{
 			GrabbedComponent = nullptr;
-			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower);
+			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower * CustomMultiplier);
 		}
 
 		CleanupInteraction();
 	}
+}
+
+void UInteractionComponent::StartSlamCharge()
+{
+	SlamChargeStartTime = GetWorld()->GetTimeSeconds();
+}
+
+void UInteractionComponent::ReleaseSlamThrow()
+{
+	if (SlamChargeStartTime <= 0.0f)
+	{
+		SlamInteraction(1.0f);
+		return;
+	}
+
+	float ChargeDuration = FMath::Clamp(GetWorld()->GetTimeSeconds() - SlamChargeStartTime, 0.0f, MaxChargeTime);
+	float ChargeAlpha = ChargeDuration / FMath::Max(0.1f, MaxChargeTime);
+	float FinalMultiplier = FMath::Lerp(1.0f, MaxChargedThrowMultiplier, ChargeAlpha);
+
+	SlamChargeStartTime = 0.0f;
+
+	if (FinalMultiplier > 1.2f)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+			{
+				float Pain = Health->GetChargedThrowPainCost();
+				if (Pain > 0.0f)
+				{
+					static const FGameplayTag BluntTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
+					Health->TakeDamage(Pain, BluntTag);
+
+#if !UE_BUILD_SHIPPING
+					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
+						FString::Printf(TEXT("⚠️ [BÓL] Naładowany rzut uszkodził złamaną rękę! -%.1f HP"), Pain));
+#endif
+				}
+			}
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	if (GEngine && FinalMultiplier > 1.2f)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Purple,
+			FString::Printf(TEXT("[ŁADOWANY RZUT] Wyrzucono z siłą x%.2f!"), FinalMultiplier));
+	}
+#endif
+
+	SlamInteraction(FinalMultiplier);
 }
 
 void UInteractionComponent::QuickInteraction()
@@ -529,11 +597,22 @@ void UInteractionComponent::QuickInteraction()
 
 bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float CameraSensitivity)
 {
+	float ArmResistance = 1.0f;
+	if (AActor* Owner = GetOwner())
+	{
+		if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+		{
+			ArmResistance = Health->GetMouseResistanceMultiplier();
+		}
+	}
+
+	// 1. TRYB INSPEKCJI 3D
 	if (bIsInspecting && IsValid(GrabbedActor) && HoldSlotComponent)
 	{
-		const float ObjectMass = GrabbedComponent ? GrabbedComponent->GetMass() : 1.0f;
-
-		const float InspectSensitivity = FMath::Clamp(1.0f / FMath::Max(1.0f, ObjectMass * InspectWeightMultiplier), 0.015f, 0.6f);
+		const float ObjectMass = (GrabbedComponent && GrabbedComponent->IsSimulatingPhysics())
+			? GrabbedComponent->GetMass()
+			: 1.0f;
+		const float InspectSensitivity = FMath::Clamp(1.0f / FMath::Max(1.0f, ObjectMass * InspectWeightMultiplier * ArmResistance), 0.015f, 0.6f);
 
 		const float PitchAngle = FMath::DegreesToRadians(-MouseY * InspectSensitivity * 2.5f);
 		const float YawAngle = FMath::DegreesToRadians(-MouseX * InspectSensitivity * 2.5f);
@@ -547,14 +626,16 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 		TargetQuat.Normalize();
 
 		HoldSlotComponent->SetRelativeRotation(TargetQuat);
-
 		return true;
 	}
 
+	// 2. FIZYCZNA MANIPULACJA MEBLAMI
 	if (IsValid(GrabbedActor) && GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 	{
 		EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
+		float CurrentEffortDelta = 0.0f;
 
+		// A. DRZWI I SZUFLADY
 		if (Type == EInteractionType::Hinge || Type == EInteractionType::Translation)
 		{
 			EMouseAxis PreferredAxis = IPhysicalInteract::Execute_GetPreferredMouseAxis(GrabbedActor);
@@ -592,14 +673,16 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 			}
 			}
 
-			IPhysicalInteract::Execute_MoveObject(GrabbedActor, SelectedMouseDelta);
-			return true;
-		}
+			float FinalDelta = SelectedMouseDelta / ArmResistance;
+			CurrentEffortDelta = FMath::Abs(SelectedMouseDelta);
 
-		if (Type == EInteractionType::Crank)
+			IPhysicalInteract::Execute_MoveObject(GrabbedActor, FinalDelta);
+		}
+		// B. KOŁA I ZAWORY
+		else if (Type == EInteractionType::Crank)
 		{
 			APlayerController* PC = GetOwner()->GetWorld()->GetFirstPlayerController();
-			if (PC && GrabbedActor)
+			if (PC)
 			{
 				FVector2D WheelPos, MousePos;
 				PC->ProjectWorldLocationToScreen(GrabbedActor->GetActorLocation(), WheelPos);
@@ -607,9 +690,47 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 				FVector2D Dir = (MousePos - WheelPos).GetSafeNormal();
 
 				float Torque = (Dir.X * MouseY) - (Dir.Y * MouseX);
-				IPhysicalInteract::Execute_MoveObject(GrabbedActor, Torque);
-				return true;
+				float FinalTorque = Torque / ArmResistance;
+				CurrentEffortDelta = FMath::Abs(Torque * 1.5f);
+
+				IPhysicalInteract::Execute_MoveObject(GrabbedActor, FinalTorque);
 			}
+		}
+
+		// NALICZANIE BÓLU PRZY WYSIŁKU
+		if (CurrentEffortDelta > 0.0f)
+		{
+			AccumulatedMechanismEffort += CurrentEffortDelta;
+
+			float CurrentTime = GetWorld()->GetTimeSeconds();
+			bool bCooldownPassed = (CurrentTime - LastMechanismPainTime) >= 2.0f;
+			const float PainEffortThreshold = (Type == EInteractionType::Crank) ? 650.0f : 450.0f;
+
+			if (AccumulatedMechanismEffort >= PainEffortThreshold && bCooldownPassed)
+			{
+				AccumulatedMechanismEffort = 0.0f;
+				LastMechanismPainTime = CurrentTime;
+
+				if (AActor* Owner = GetOwner())
+				{
+					if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+					{
+						float ArmPain = Health->GetActionPainCost(EAnatomicalLimb::LeftArm);
+						if (ArmPain > 0.0f)
+						{
+							static const FGameplayTag BluntTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
+							Health->TakeDamage(ArmPain, BluntTag);
+
+#if !UE_BUILD_SHIPPING
+							if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Red,
+								FString::Printf(TEXT("⚠️ [BÓL] Ciągły wysiłek przy meblu/zaworze! -%.1f HP"), ArmPain));
+#endif
+						}
+					}
+				}
+			}
+
+			return true;
 		}
 	}
 
@@ -619,6 +740,8 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 void UInteractionComponent::CleanupInteraction()
 {
 	bIsInspecting = false;
+	AccumulatedMechanismEffort = 0.0f;
+	LastMechanismPainTime = 0.0f;
 
 	if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(GetOwner()))
 	{
@@ -648,19 +771,18 @@ void UInteractionComponent::ZoomHoldSlot(float ScrollDelta)
 	{
 		FVector Loc = HoldSlotComponent->GetRelativeLocation();
 
+		ACharacter* Char = Cast<ACharacter>(GetOwner());
+		const float CapsuleRadius = Char && Char->GetCapsuleComponent() ? Char->GetCapsuleComponent()->GetScaledCapsuleRadius() : 45.0f;
 		const float ObjectRadius = GrabbedComponent->Bounds.SphereRadius;
-		const float MinZoom = FMath::Max(ObjectRadius + 40.0f, 25.0f);
 
-		float MaxSafeDropLimit = (InteractionDistance + BreakDistanceBuffer) - 20.0f;
-		const float MaxZoom = FMath::Min(CurrentBaseHoldDistance + 90.0f, MaxSafeDropLimit);
+		const float MinZoom = CapsuleRadius + ObjectRadius + 8.0f;
+		const float MaxZoom = FMath::Max(MinZoom + 70.0f, InteractionDistance + (ObjectRadius * 0.4f));
 
-		Loc.X = FMath::Clamp(Loc.X + (ScrollDelta * 15.0f), MinZoom, MaxZoom);
+		Loc.X = FMath::Clamp(Loc.X + (ScrollDelta * 18.0f), MinZoom, MaxZoom);
 		Loc.Y = 0.0f;
 
-		// IM BARDZIEJ PRZYBLIŻASZ (małe Loc.X), TYM NIŻEJ OPADA OBIEKT W RĘKACH:
-		// Normalny zoom ma Z = 0, maksymalne przybliżenie obniża go o kilkanaście cm w dół ekranu
-		float ZoomAlpha = FMath::GetRangePct(MaxZoom, MinZoom, Loc.X); // od 0 (oddalony) do 1 (przybliżony)
-		Loc.Z = FMath::Lerp(0.0f, -15.0f, ZoomAlpha);
+		float ZoomAlpha = FMath::GetRangePct(MaxZoom, MinZoom, Loc.X);
+		Loc.Z = FMath::Lerp(0.0f, -22.0f, ZoomAlpha);
 
 		HoldSlotComponent->SetRelativeLocation(Loc);
 	}
@@ -685,37 +807,29 @@ void UInteractionComponent::ToggleInspectMode()
 	bIsInspecting = !bIsInspecting;
 }
 
-// ====================================================================
-// GŁÓWNA OBSŁUGA KLAWISZA [E] (Mózg Rąk Gracza)
-// ====================================================================
 void UInteractionComponent::TryPickupFocusedObject()
 {
 	FHitResult Hit;
 	bool bHit = PerformLineTrace(Hit);
 	AActor* HitActor = bHit ? Hit.GetActor() : nullptr;
 
-	// SCENARIUSZ A: Trzymamy klucz i celujemy w Drzwi/Szufladę z zamkiem -> Używamy klucza!
-	if (GrabbedActor && HitActor)
+	// ====================================================================
+	// SCENARIUSZ A: CELUJEMY W DRZWI / ZAMEK [E] -> Otwieranie LUB Ryglowanie!
+	// ====================================================================
+	if (HitActor && HitActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 	{
-		if (ABaseInteractable* TargetDoor = Cast<ABaseInteractable>(HitActor))
-		{
-			if (TargetDoor->RequiredKeyTag.IsValid())
-			{
-				if (TargetDoor->TryUnlockWithKey(GrabbedActor, GetOwner()))
-				{
-					StopInteraction(); // Puszczamy użyty klucz
-					return;
-				}
-			}
-		}
+		// Czyste zapytanie czy to zamek (jeśli nie, funkcja zostanie zignorowana w meblu):
+		IPhysicalInteract::Execute_TryUnlockFromInput(HitActor, GetOwner());
+		return;
 	}
 
-	// SCENARIUSZ B: Trzymamy mały przedmiot w dłoni i wciskamy [E] w przestrzeń -> Chowamy do plecaka
+	// ====================================================================
+	// SCENARIUSZ B: Trzymamy mały przedmiot w dłoni i wciskamy [E] w pustkę -> Chowamy do plecaka
+	// ====================================================================
 	if (GrabbedActor)
 	{
 		if (GrabbedActor->Implements<UPhysicalInteract>())
 		{
-			// Puszczamy chwyt TYLKO jeśli przedmiot faktycznie zmieści się w kieszeni:
 			if (IPhysicalInteract::Execute_CanBePocketed(GrabbedActor))
 			{
 				AActor* ActorToPocket = GrabbedActor;
@@ -724,12 +838,12 @@ void UInteractionComponent::TryPickupFocusedObject()
 				return;
 			}
 		}
-
-		// Ciężkie skrzynie lub klamki ignorują [E] (nie puszczają chwytu):
 		return;
 	}
 
-	// SCENARIUSZ C: Puste ręce -> Zwykłe podniesienie do plecaka LUB ryglowanie drzwi/szuflad z plecaka
+	// ====================================================================
+	// SCENARIUSZ C: Puste ręce -> Podniesienie przedmiotu do plecaka
+	// ====================================================================
 	if (HitActor)
 	{
 		IPhysicalInteract::Execute_PickupObject(HitActor, GetOwner());
@@ -740,12 +854,9 @@ void UInteractionComponent::TryQuickConsumeFocusedObject()
 {
 	FHitResult Hit;
 
-	// Odpalamy skan z oczu gracza:
 	if (PerformLineTrace(Hit) && Hit.GetActor())
 	{
 		AActor* HitActor = Hit.GetActor();
-
-		// Jeśli obiekt implementuje nasz interfejs -> każemy mu się skonsumować!
 		if (HitActor->Implements<UPhysicalInteract>())
 		{
 			IPhysicalInteract::Execute_ConsumeObject(HitActor, GetOwner());

@@ -1,5 +1,6 @@
-#include "SafeLightComponent.h"
+ï»¿#include "SafeLightComponent.h"
 #include "SanityComponent.h"
+#include "ReactionReceiverComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Components/PointLightComponent.h"
 #include "Components/SpotLightComponent.h"
@@ -12,6 +13,8 @@ USafeLightComponent::USafeLightComponent()
 
 	SphereRadius = 500.0f;
 	SetCollisionProfileName(TEXT("OverlapAllDynamic"));
+	SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	SetCollisionResponseToAllChannels(ECR_Overlap);
 	SetGenerateOverlapEvents(true);
 }
 
@@ -19,7 +22,10 @@ void USafeLightComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 1. Automatyczna synchronizacja ze Ÿród³em œwiat³a:
+	SetCollisionProfileName(TEXT("OverlapAllDynamic"));
+	SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	SetCollisionResponseToAllChannels(ECR_Overlap);
+
 	if (bAutoSyncWithLight)
 	{
 		SyncWithParentLight();
@@ -28,14 +34,47 @@ void USafeLightComponent::BeginPlay()
 	OnComponentBeginOverlap.AddDynamic(this, &USafeLightComponent::OnOverlapBegin);
 	OnComponentEndOverlap.AddDynamic(this, &USafeLightComponent::OnOverlapEnd);
 
-	bInitialCheckDone = false; // Gotowy do sprawdzenia w 1. klatce po zakoñczeniu wszystkich BeginPlay
+	// AUTONOMICZNA INTEGRACJA Z CHEMIA:
+	if (bIgniteWhenOwnerIsBurning)
+	{
+		if (AActor* Owner = GetOwner())
+		{
+			if (UReactionReceiverComponent* ReactionComp = Owner->FindComponentByClass<UReactionReceiverComponent>())
+			{
+				ReactionComp->OnStateApplied.AddDynamic(this, &USafeLightComponent::HandleOwnerStateApplied);
+				ReactionComp->OnStateRemoved.AddDynamic(this, &USafeLightComponent::HandleOwnerStateRemoved);
+			}
+		}
+	}
+}
+
+void USafeLightComponent::HandleOwnerStateApplied(FGameplayTag StateTag, float Intensity)
+{
+	static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
+
+	// Gdy obiekt staje w pÅ‚omieniach -> wÅ‚Ä…czamy bezpieczne Å›wiatÅ‚o i ustawiamy zasiÄ™g!
+	if (StateTag.MatchesTag(BurningStatus))
+	{
+		SetLightActive(true);
+		SetDynamicRadius(350.0f * Intensity);
+	}
+}
+
+void USafeLightComponent::HandleOwnerStateRemoved(FGameplayTag StateTag)
+{
+	static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
+
+	// Gdy ogieÅ„ gaÅ›nie -> wyÅ‚Ä…czamy bezpieczne Å›wiatÅ‚o:
+	if (StateTag.MatchesTag(BurningStatus))
+	{
+		SetLightActive(false);
+	}
 }
 
 void USafeLightComponent::SyncWithParentLight()
 {
 	if (AActor* Owner = GetOwner())
 	{
-		// A. Jeœli to Reflektor ze sto¿kiem (SpotLight):
 		if (USpotLightComponent* SpotLight = Owner->FindComponentByClass<USpotLightComponent>())
 		{
 			SetSphereRadius(SpotLight->AttenuationRadius, true);
@@ -44,7 +83,6 @@ void USafeLightComponent::SyncWithParentLight()
 			return;
 		}
 
-		// B. Jeœli to Zwyk³a ¯arówka dookólna (PointLight):
 		if (UPointLightComponent* PointLight = Owner->FindComponentByClass<UPointLightComponent>())
 		{
 			SetSphereRadius(PointLight->AttenuationRadius, true);
@@ -61,10 +99,8 @@ void USafeLightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (!PlayerPawn) return;
 
-	// Jeœli to aktywne Ÿród³o œwiat³a:
 	if (bIsLightActive)
 	{
-		// 1. Zawsze upewniamy siê, ¿e mamy wskaŸnik na Sanity gracza:
 		if (!CachedPlayerSanity.IsValid())
 		{
 			if (USanityComponent* Sanity = PlayerPawn->FindComponentByClass<USanityComponent>())
@@ -79,30 +115,22 @@ void USafeLightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 			bIsCurrentlyHeld = BaseProp->bIsHeld;
 		}
 
-		// ====================================================================
-		// 2. DWUKIERUNKOWA KONTROLA ODLEGLOŒCI (WEJŒCIE I WYJŒCIE):
-		// ====================================================================
 		if (bIsCurrentlyHeld)
 		{
-			// Jeœli trzymamy w rêkach -> zawsze jesteœmy w œwietle:
 			bIsPlayerInside = true;
 			bIsPlayerInCone = true;
 		}
 		else
 		{
-			// Jeœli obiekt le¿y na ziemi (lub to latarnia miejska):
 			float Distance = FVector::Dist(GetComponentLocation(), PlayerPawn->GetActorLocation());
-
-			// PANCERNA MATEMATYKA: Wchodzisz w promieñ = PRAWDA, Wychodzisz = FA£SZ:
 			bIsPlayerInside = (Distance <= SphereRadius);
 			bIsPlayerInCone = bIsSpotlightCone ? IsPlayerInsideLightCone(PlayerPawn) : true;
 		}
 
-		UpdatePlayerLightState(); // Automatycznie dodaje lub odejmuje œwiat³o!
+		UpdatePlayerLightState();
 	}
 	else
 	{
-		// Jeœli œwiat³o zosta³o zgaszone (np. zalane wod¹):
 		bIsPlayerInside = false;
 		bIsPlayerInCone = false;
 		UpdatePlayerLightState();
@@ -142,10 +170,7 @@ void USafeLightComponent::OnOverlapEnd(UPrimitiveComponent* OverlappedComp, AAct
 
 	if (ABaseInteractable* BaseProp = Cast<ABaseInteractable>(GetOwner()))
 	{
-		if (BaseProp->bIsHeld)
-		{
-			return; // Niesiony obiekt nie gasi œwiat³a
-		}
+		if (BaseProp->bIsHeld) return;
 	}
 
 	bIsPlayerInside = false;
@@ -162,18 +187,19 @@ void USafeLightComponent::UpdatePlayerLightState()
 		return;
 	}
 
+	// Twoja stara logika: sprawdza Cone i Overlap
 	bool bShouldGiveLight = bIsPlayerInside && bIsLightActive && (!bIsSpotlightCone || bIsPlayerInCone);
 
-	// PANCERNA LOGIKA: Dodajemy œwiat³o TYLKO RAZ:
 	if (bShouldGiveLight && !bHasContributedLight)
 	{
-		CachedPlayerSanity->AddLightSource();
+		// Zamiast AddLightSource() -> Rejestrujemy do sprawdzenia przez Å›cianÄ™
+		CachedPlayerSanity->RegisterPotentialLight(this);
 		bHasContributedLight = true;
 	}
-	// Odejmujemy œwiat³o TYLKO jeœli wczeœniej je dodaliœmy:
 	else if (!bShouldGiveLight && bHasContributedLight)
 	{
-		CachedPlayerSanity->RemoveLightSource();
+		// WyszliÅ›my ze Å›wiatÅ‚a lub stoÅ¼ka -> Wyrejestruj
+		CachedPlayerSanity->UnregisterPotentialLight(this);
 		bHasContributedLight = false;
 	}
 }

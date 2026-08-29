@@ -89,4 +89,7 @@ public:
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	bool ConsumeObject(AActor* InstigatorActor);
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Lightkeeper|Interaction")
+	void TryUnlockFromInput(AActor* InstigatorActor);
 };

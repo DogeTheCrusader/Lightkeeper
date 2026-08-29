@@ -1,10 +1,12 @@
-#pragma once
+ï»¿#pragma once
 
 #include "CoreMinimal.h"
 #include "Components/SphereComponent.h"
+#include "GameplayTagContainer.h"
 #include "SafeLightComponent.generated.h"
 
 class USanityComponent;
+class UReactionReceiverComponent;
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class LIGHTKEEPER_API USafeLightComponent : public USphereComponent
@@ -16,29 +18,27 @@ public:
 
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
-	// Czy to Ÿród³o œwiat³a jest zapalone?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Safe Light")
 	bool bIsLightActive = true;
 
-	// AUTOMATYCZNA SYNCHRONIZACJA: Samodzielnie odczytuje zasiêg i k¹t z ¿arówki/reflektora na tym samym obiekcie!
+	// Czy to Å›wiatÅ‚o ma siÄ™ automatycznie zapalaÄ‡, gdy obiekt pÅ‚onie, i gasnÄ…Ä‡, gdy ogieÅ„ zgaÅ›nie?
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Safe Light")
+	bool bIgniteWhenOwnerIsBurning = true;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Safe Light")
 	bool bAutoSyncWithLight = true;
 
-	// Czy to jest kierunkowy reflektor ze sto¿kiem (SpotLight), czy œwieci dooko³a 360 (PointLight)?
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Safe Light",
 		meta = (EditCondition = "!bAutoSyncWithLight", EditConditionHides))
 	bool bIsSpotlightCone = false;
 
-	// K¹t sto¿ka œwiat³a (dla reflektorów):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Safe Light",
 		meta = (EditCondition = "!bAutoSyncWithLight && bIsSpotlightCone", EditConditionHides))
 	float ConeAngle = 45.0f;
 
-	// W³¹cza lub gasi strefê œwiat³a
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Safe Light")
 	void SetLightActive(bool bNewActive);
 
-	// Dynamicznie zmienia promieñ œwiat³a (dla rosn¹cych/gasn¹cych p³omieni)
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Safe Light")
 	void SetDynamicRadius(float NewRadius);
 
@@ -51,8 +51,14 @@ protected:
 	UFUNCTION()
 	void OnOverlapEnd(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
+	// Autonomiczne nasÅ‚uchiwanie chemii:
+	UFUNCTION()
+	void HandleOwnerStateApplied(FGameplayTag StateTag, float Intensity);
+
+	UFUNCTION()
+	void HandleOwnerStateRemoved(FGameplayTag StateTag);
+
 private:
-	bool bInitialCheckDone = false; // Flaga sprawdzania w klatce 1 po za³adowaniu gracza
 	bool bIsPlayerInside = false;
 	bool bIsPlayerInCone = false;
 	bool bHasContributedLight = false;

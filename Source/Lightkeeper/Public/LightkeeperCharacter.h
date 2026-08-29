@@ -4,7 +4,10 @@
 #include "GameFramework/Character.h"
 #include "InteractionComponent.h"
 #include "StaminaComponent.h"
+#include "HealthComponent.h"
 #include "LightkeeperCharacter.generated.h"
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCharacterLandedEvent, const FHitResult&, Hit, float, FallSpeed);
 
 UCLASS()
 class LIGHTKEEPER_API ALightkeeperCharacter : public ACharacter
@@ -13,10 +16,8 @@ class LIGHTKEEPER_API ALightkeeperCharacter : public ACharacter
 
 public:
 	ALightkeeperCharacter();
-
-protected:
-	virtual void BeginPlay() override;
-	virtual void Landed(const FHitResult& Hit) override;
+	virtual void Tick(float DeltaTime) override;
+	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
 	// Komponenty
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
@@ -25,21 +26,41 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	UStaminaComponent* StaminaComp;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UProgressionComponent* ProgressionComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	class UHealthComponent* HealthComp;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	class USanityComponent* SanityComp;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	class UStatusEffectComponent* StatusComp;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	class UInventoryComponent* InventoryComp;
 
-public:
-	virtual void Tick(float DeltaTime) override;
-	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UToolManagerComponent* ToolManagerComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UUtilityManagerComponent* UtilityManagerComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class ULanternComponent* LanternComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UReactionReceiverComponent* ReactionComp;
+
+	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Events")
+	FOnCharacterLandedEvent OnCharacterLanded;
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Capabilities")
+	bool CanPerformAction(EPlayerAction Action) const
+	{
+		return HealthComp ? HealthComp->IsActionAllowed(Action) : true;
+	}
 
 	// ==========================================================
 	// 1. ZMIENNE DLA TWOICH 3 LINIJEK W KONSTRUKTORZE!
@@ -99,4 +120,27 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Movement")
 	void UpdateMovementSpeed();
+
+	// Opcja w Details: Postać automatycznie zaczyna grę z tym urazem:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Debug")
+	FGameplayTag DebugStartInjury;
+
+	// Komendy konsoli (~):
+	UFUNCTION(Exec, Category = "Lightkeeper|Debug")
+	void Debug_AddInjury(FString InjuryName);
+
+	UFUNCTION(Exec, Category = "Lightkeeper|Debug")
+	void Debug_ClearInjuries();
+
+	UFUNCTION(Exec, Category = "Lightkeeper|Debug")
+	void Debug_TestLaudanum();
+
+	UFUNCTION(Exec, Category = "Lightkeeper|Debug")
+	void Debug_TestBandage();
+
+	void Debug_TestLegs(); void Debug_TestRightArm(); void Debug_TestChest(); void Debug_TestSprain();
+
+protected:
+	virtual void BeginPlay() override;
+	virtual void Landed(const FHitResult& Hit) override;
 };

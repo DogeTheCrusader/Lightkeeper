@@ -1,12 +1,10 @@
-#include "InventoryComponent.h"
+ï»¿#include "InventoryComponent.h"
 #include "BaseInteractable.h"
-#include "HealthComponent.h"
+#include "ToolManagerComponent.h"
 #include "Engine/World.h"
 
-// Konstruktor
 UInventoryComponent::UInventoryComponent()
 {
-	// Wy³¹czamy Tick - optymalizacja! Ekwipunek nie musi siê aktualizowaæ co klatkê.
 	PrimaryComponentTick.bCanEverTick = false;
 }
 
@@ -15,75 +13,60 @@ void UInventoryComponent::BeginPlay()
 	Super::BeginPlay();
 }
 
-// G³ówna pêtla szukaj¹ca miejsca (jak w Tetrisie)
 bool UInventoryComponent::TryAddItem(FInventoryItemData ItemToAdd)
 {
-	// Przeszukujemy siatkê rz¹d po rzêdzie, kolumna po kolumnie (od lewej do prawej, od góry do do³u)
+	// Przeszukujemy siatkÄ™ Resident Evil w poszukiwaniu wolnego miejsca:
 	for (int32 Row = 0; Row < Rows; ++Row)
 	{
 		for (int32 Col = 0; Col < Columns; ++Col)
 		{
-			// Czy ten konkretny "prostok¹t" przestrzeni jest wolny?
 			if (IsSpaceAvailable(ItemToAdd.GridSize, Col, Row))
 			{
-				// ZnaleŸliœmy miejsce! Tworzymy nowy wpis do plecaka.
 				FInventorySlot NewSlot;
 				NewSlot.TopLeftIndex = FIntPoint(Col, Row);
 				NewSlot.ItemData = ItemToAdd;
 
-				// Dodajemy do bazy i informujemy UI
 				StoredItems.Add(NewSlot);
-				OnInventoryUpdated.Broadcast();
+				OnInventoryUpdated.Broadcast(); // Powiadamiamy UI
 
-				return true; // Sukces
+				return true;
 			}
 		}
 	}
 
-	// Przeszukaliœmy ca³y plecak i nie ma miejsca
-	return false;
+	return false; // Brak miejsca w plecaku!
 }
 
-// Wewnêtrzna matematyka Siatki (Sprawdzanie kolizji 2D)
 bool UInventoryComponent::IsSpaceAvailable(FIntPoint ItemSize, int32 StartCol, int32 StartRow) const
 {
-	// 1. Sprawdzenie granic (Czy przedmiot nie wystaje poza krawêdzie plecaka?)
 	if (StartCol < 0 || StartRow < 0) return false;
 	if (StartCol + ItemSize.X > Columns) return false;
 	if (StartRow + ItemSize.Y > Rows) return false;
 
-	// 2. Sprawdzenie kolizji z istniej¹cymi przedmiotami
 	for (const FInventorySlot& Slot : StoredItems)
 	{
-		// Wymiary sprawdzanego prostok¹ta (naszego nowego przedmiotu)
 		int32 R1_Left = StartCol;
 		int32 R1_Right = StartCol + ItemSize.X;
 		int32 R1_Top = StartRow;
 		int32 R1_Bottom = StartRow + ItemSize.Y;
 
-		// Wymiary prostok¹ta przedmiotu, który ju¿ le¿y w plecaku
 		int32 R2_Left = Slot.TopLeftIndex.X;
 		int32 R2_Right = Slot.TopLeftIndex.X + Slot.ItemData.GridSize.X;
 		int32 R2_Top = Slot.TopLeftIndex.Y;
 		int32 R2_Bottom = Slot.TopLeftIndex.Y + Slot.ItemData.GridSize.Y;
 
-		// Test AABB (Axis-Aligned Bounding Box) dla 2D. 
-		// Sprawdza, czy te dwa prostok¹ty siê nak³adaj¹.
 		if (R1_Left < R2_Right && R1_Right > R2_Left &&
 			R1_Top < R2_Bottom && R1_Bottom > R2_Top)
 		{
-			// Znaleziono kolizjê - to miejsce jest zajête!
-			return false;
+			return false; // Kolizja z innym przedmiotem w siatce
 		}
 	}
 
-	// Prostok¹t nie wyszed³ poza granice i na nic nie wpad³ - miejsce jest wolne!
 	return true;
 }
 
 ABaseInteractable* UInventoryComponent::DropItem(int32 ItemIndex, FVector DropLocation, FRotator DropRotation)
 {
-	// 1. Sprawdzamy czy taki slot istnieje w plecaku:
 	if (!StoredItems.IsValidIndex(ItemIndex))
 	{
 		return nullptr;
@@ -91,17 +74,31 @@ ABaseInteractable* UInventoryComponent::DropItem(int32 ItemIndex, FVector DropLo
 
 	FInventorySlot SlotToDrop = StoredItems[ItemIndex];
 
-	// 2. Sprawdzamy czy przedmiot wie, jaki Blueprint ma zrespawnowaæ:
 	if (!SlotToDrop.ItemData.DropClass)
 	{
 		return nullptr;
 	}
 
-	// 3. Usuwamy przedmiot z pamiêci plecaka:
+	// 1. Usuwamy przedmiot z pamiÄ™ci plecaka:
 	StoredItems.RemoveAt(ItemIndex);
-	OnInventoryUpdated.Broadcast(); // Sygna³ do odœwie¿enia UI
+	OnInventoryUpdated.Broadcast();
 
-	// 4. Spawnujemy fizyczny model 3D w œwiecie:
+	// 2. Chowamy broÅ„ z rÄ…k TYLKO JEÅšLI wyrzucana broÅ„ to DOKÅADNIE TA, ktÃ³rÄ… trzymamy w dÅ‚oni:
+	if (AActor* Owner = GetOwner())
+	{
+		if (UToolManagerComponent* ToolMgr = Owner->FindComponentByClass<UToolManagerComponent>())
+		{
+			if (ToolMgr->CurrentEquippedTool)
+			{
+				if (ToolMgr->CurrentEquippedTool->ToolTag.MatchesTag(SlotToDrop.ItemData.ItemTag))
+				{
+					ToolMgr->HolsterCurrentTool();
+				}
+			}
+		}
+	}
+
+	// 3. Spawnujemy fizyczny obiekt w Å›wiecie 3D:
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
@@ -112,10 +109,16 @@ ABaseInteractable* UInventoryComponent::DropItem(int32 ItemIndex, FVector DropLo
 		SpawnParams
 	);
 
-	// 5. Przywracamy mu zapisane punkty ¿ycia (HP):
-	if (SpawnedProp && SpawnedProp->HealthComp)
+	if (SpawnedProp)
 	{
-		SpawnedProp->HealthComp->CurrentHealth = SlotToDrop.ItemData.SavedHealth;
+		SpawnedProp->ApplyItemData(SlotToDrop.ItemData);
+
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(SpawnedProp->GetRootComponent()))
+		{
+			// PRZEDMIOT STARTUJE ZE SPOKOJNEJ POZYCJI BEZ FAÅSZYWYCH IMPULSÃ“W:
+			Prim->SetPhysicsLinearVelocity(FVector::ZeroVector);
+			Prim->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
+		}
 	}
 
 	return SpawnedProp;
@@ -129,7 +132,7 @@ bool UInventoryComponent::HasItemWithTag(FGameplayTag ItemTag) const
 	{
 		if (Slot.ItemData.ItemTag.MatchesTag(ItemTag))
 		{
-			return true; // Znaleziono pasuj¹cy przedmiot!
+			return true;
 		}
 	}
 

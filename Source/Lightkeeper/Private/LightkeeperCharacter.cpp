@@ -1,30 +1,24 @@
 ﻿#include "LightkeeperCharacter.h"
 #include "GameFramework/CharacterMovementComponent.h" // <--- Wymagane dla GetCharacterMovement()!
 #include "Components/CapsuleComponent.h"            // <--- Wymagane dla GetCapsuleComponent()!
-
+#include "ReactionReceiverComponent.h"
 #include "InteractionComponent.h"
 #include "StaminaComponent.h"
 #include "HealthComponent.h"
+#include "ProgressionComponent.h"
 #include "SanityComponent.h"
-#include "LanternComponent.h"
 #include "StatusEffectComponent.h"
 #include "InventoryComponent.h"
+#include "ToolManagerComponent.h"
+#include "UtilityManagerComponent.h"
+#include "LanternComponent.h"
 
 ALightkeeperCharacter::ALightkeeperCharacter()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
 	// ==========================================================
-	// LINIJKI W KONSTRUKTORZE POSTACI!
-	// ==========================================================
-	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
-	GetCharacterMovement()->SetCrouchedHalfHeight(CrouchingCapsuleHalfHeight);
-	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
-	GetCapsuleComponent()->InitCapsuleSize(CapsuleRadius, StandingCapsuleHalfHeight);
-	GetCharacterMovement()->AirControl = 0.4f;
-
-	// ==========================================================
-	// PODPINANIE KOMPONENTÓW
+	// 1. NAJPIERW TWORZYMY WSZYSTKIE KOMPONENTY (CreateDefaultSubobject):
 	// ==========================================================
 	InteractionComp = CreateDefaultSubobject<UInteractionComponent>(TEXT("InteractionComponent"));
 	StaminaComp = CreateDefaultSubobject<UStaminaComponent>(TEXT("StaminaComponent"));
@@ -32,11 +26,50 @@ ALightkeeperCharacter::ALightkeeperCharacter()
 	SanityComp = CreateDefaultSubobject<USanityComponent>(TEXT("SanityComponent"));
 	StatusComp = CreateDefaultSubobject<UStatusEffectComponent>(TEXT("StatusEffectComponent"));
 	InventoryComp = CreateDefaultSubobject<UInventoryComponent>(TEXT("InventoryComponent"));
+	ToolManagerComp = CreateDefaultSubobject<UToolManagerComponent>(TEXT("ToolManagerComp"));
+	UtilityManagerComp = CreateDefaultSubobject<UUtilityManagerComponent>(TEXT("UtilityManagerComp"));
+	LanternComp = CreateDefaultSubobject<ULanternComponent>(TEXT("LanternComp"));
+	ReactionComp = CreateDefaultSubobject<UReactionReceiverComponent>(TEXT("ReactionComp"));
+	ProgressionComp = CreateDefaultSubobject<UProgressionComponent>(TEXT("ProgressionComp"));
+
+	// ==========================================================
+	// 2. KONFIGURACJA POSTACI I SILNIKA RUCHU:
+	// ==========================================================
+	if (GetCharacterMovement())
+	{
+		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+		GetCharacterMovement()->SetCrouchedHalfHeight(CrouchingCapsuleHalfHeight);
+		GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
+		GetCharacterMovement()->AirControl = 0.4f;
+	}
+
+	if (GetCapsuleComponent())
+	{
+		GetCapsuleComponent()->InitCapsuleSize(CapsuleRadius, StandingCapsuleHalfHeight);
+	}
+
+	// ==========================================================
+	// 3. DOPIERO TERAZ KONFIGURUJEMY WŁAŚCIWOŚCI KOMPONENTÓW (BEZPIECZNIE!):
+	// ==========================================================
+	if (HealthComp)
+	{
+		HealthComp->bCanReceiveInjuries = true; // Gracz jako jedyny otrzymuje urazy kości!
+		HealthComp->BaseMaxHealth = 100.0f;
+	}
 }
 
 void ALightkeeperCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+#if !UE_BUILD_SHIPPING
+	// Auto-aplikacja urazu startowego z panelu Details:
+	if (HealthComp && DebugStartInjury.IsValid())
+	{
+		HealthComp->AddInjury(DebugStartInjury);
+	}
+#endif
+
 	if (GetCharacterMovement())
 	{
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
@@ -56,7 +89,7 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 		// ====================================================================
 		// 1. TELEMETRIA LATARNI I NAFTY
 		// ====================================================================
-		if (ULanternComponent* LanternComp = FindComponentByClass<ULanternComponent>())
+		if (LanternComp)
 		{
 			int32 OilBottleCount = 0;
 			if (UInventoryComponent* InvComp = FindComponentByClass<UInventoryComponent>())
@@ -106,7 +139,8 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 		if (HealthComp)
 		{
 			float StaminaVal = StaminaComp ? StaminaComp->Stamina : 100.0f;
-			float MaxStaminaVal = StaminaComp ? StaminaComp->MaxStamina : 100.0f;
+			// ODCZYTUJEMY EFEKTYWNĄ STAMINĘ UWZGLĘDNIAJĄCĄ URAZ KLATKI:
+			float MaxStaminaVal = StaminaComp ? StaminaComp->GetEffectiveMaxStamina() : 100.0f;
 
 			FColor HealthColor = (HealthComp->CurrentHealth > 30.0f) ? FColor::Green : FColor::Red;
 
@@ -123,6 +157,19 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 void ALightkeeperCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+#if !UE_BUILD_SHIPPING
+	// ====================================================================
+	// BŁYSKAWICZNE KLAWISZE TESTOWE (NUMPAD):
+	// ====================================================================
+	PlayerInputComponent->BindKey(EKeys::NumPadOne, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestLegs);
+	PlayerInputComponent->BindKey(EKeys::NumPadTwo, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestRightArm);
+	PlayerInputComponent->BindKey(EKeys::NumPadThree, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestChest);
+	PlayerInputComponent->BindKey(EKeys::NumPadFour, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestSprain);
+	PlayerInputComponent->BindKey(EKeys::NumPadFive, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestLaudanum);
+	PlayerInputComponent->BindKey(EKeys::NumPadSix, IE_Pressed, this, &ALightkeeperCharacter::Debug_TestBandage);
+	PlayerInputComponent->BindKey(EKeys::NumPadZero, IE_Pressed, this, &ALightkeeperCharacter::Debug_ClearInjuries);
+#endif
 }
 
 void ALightkeeperCharacter::ForwardMouseLook(float MouseX, float MouseY)
@@ -139,53 +186,16 @@ void ALightkeeperCharacter::ForwardMouseLook(float MouseX, float MouseY)
 	AddControllerPitchInput(MouseY * CameraSensitivity);
 }
 
-void ALightkeeperCharacter::UpdateMovementSpeed()
-{
-	if (!GetCharacterMovement() || !GetCapsuleComponent()) return;
-
-	float CurrentCapsuleHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	bool bIsCurrentlyCrouching = CurrentCapsuleHeight < 70.0f;
-
-	// ====================================================================
-	// 1. POPRAWNA HIERARCHIA PRĘDKOŚCI (Sprint ma ZAWSZE pierwszeństwo!):
-	// ====================================================================
-	float TargetSpeed = WalkSpeed; // Domyślnie 600.0
-
-	if (StaminaComp && StaminaComp->bIsSprinting)
-	{
-		TargetSpeed = SprintSpeed; // Jeśli gracz sprintuje -> od razu 900.0 (nie czeka na wstawanie!)
-	}
-	else if (bIsCurrentlyCrouching)
-	{
-		TargetSpeed = CrouchSpeed; // Jeśli kuca i nie sprintuje -> 200.0
-	}
-
-	// 2. MNOŻNIK WAGI PRZEDMIOTU (Dla wolnych propów):
-	if (InteractionComp && InteractionComp->GetGrabbedActor())
-	{
-		EInteractionType HeldType = IPhysicalInteract::Execute_GetInteractionType(InteractionComp->GetGrabbedActor());
-
-		if (HeldType == EInteractionType::Grab_Free)
-		{
-			if (UPrimitiveComponent* HeldMesh = InteractionComp->GetGrabbedComponent())
-			{
-				float PropMass = HeldMesh->GetMass();
-				TargetSpeed = InteractionComp->CalculateMovementSpeed(TargetSpeed, PropMass);
-			}
-		}
-	}
-
-	// 3. APLIKUJEMY PRĘDKOŚĆ DO SILNIKA RUCHU:
-	GetCharacterMovement()->MaxWalkSpeed = TargetSpeed;
-}
-
 void ALightkeeperCharacter::Landed(const FHitResult& Hit)
 {
-	Super::Landed(Hit); // Silnik przestawia postać z Falling na Walking
+	Super::Landed(Hit);
 
-	// ====================================================================
-	// ZAMIENIONE: Używamy HandleLanded, które nie jest blokowane przez IsFalling!
-	// ====================================================================
+	// Pobieramy prędkość spadania w momencie uderzenia o ziemię
+	float FallSpeed = FMath::Abs(GetVelocity().Z);
+
+	// Wysyłamy Hit ORAZ FallSpeed!
+	OnCharacterLanded.Broadcast(Hit, FallSpeed);
+
 	if (StaminaComp)
 	{
 		StaminaComp->HandleLanded();
@@ -194,4 +204,152 @@ void ALightkeeperCharacter::Landed(const FHitResult& Hit)
 	{
 		UpdateMovementSpeed();
 	}
+}
+
+void ALightkeeperCharacter::UpdateMovementSpeed()
+{
+	if (!GetCharacterMovement() || !GetCapsuleComponent()) return;
+
+	float TargetSpeed = WalkSpeed; // Domyślnie 300 cm/s
+
+	if (StaminaComp && StaminaComp->bIsSprinting)
+	{
+		TargetSpeed = SprintSpeed; // Domyślnie 600 cm/s
+
+		// ZŁAMANA NOGA: Przytrzymanie Shift daje wyraźny sprint 420 cm/s (kosztem utraty 2 HP/s!):
+		if (HealthComp)
+		{
+			static const FGameplayTag MajorLegsTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Major.Legs"), false);
+			if (HealthComp->HasActiveInjury(MajorLegsTag))
+			{
+				TargetSpeed = 420.0f; // Szybciej od chodu (300), ale wolniej od zdrowego sprintu (600)
+			}
+		}
+	}
+	else if (GetCapsuleComponent()->GetScaledCapsuleHalfHeight() < 70.0f)
+	{
+		TargetSpeed = CrouchSpeed; // 150 cm/s
+	}
+
+
+	static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
+	if (StatusComp && StatusComp->HasStatusEffect(GuardTag))
+	{
+		TargetSpeed *= 0.65f; // Gracz manewruje wolniejszym, stabilnym krokiem!
+	}
+
+	// Mnożnik skręconej kostki / kulawizny:
+	if (HealthComp)
+	{
+		TargetSpeed *= HealthComp->GetMovementSpeedMultiplier();
+	}
+
+	// Mnożnik niesionego mebla (Fizyka rąk):
+	if (InteractionComp && InteractionComp->GetGrabbedActor())
+	{
+		if (IPhysicalInteract::Execute_GetInteractionType(InteractionComp->GetGrabbedActor()) == EInteractionType::Grab_Free)
+		{
+			if (UPrimitiveComponent* HeldMesh = InteractionComp->GetGrabbedComponent())
+			{
+				if (HeldMesh->IsSimulatingPhysics())
+				{
+					TargetSpeed = InteractionComp->CalculateMovementSpeed(TargetSpeed, HeldMesh->GetMass());
+				}
+			}
+		}
+	}
+
+	GetCharacterMovement()->MaxWalkSpeed = TargetSpeed;
+}
+
+
+void ALightkeeperCharacter::Debug_TestLegs() { Debug_AddInjury(TEXT("Legs")); }
+void ALightkeeperCharacter::Debug_TestRightArm() { Debug_AddInjury(TEXT("RightArm")); }
+void ALightkeeperCharacter::Debug_TestChest() { Debug_AddInjury(TEXT("Chest")); }
+void ALightkeeperCharacter::Debug_TestSprain() { Debug_AddInjury(TEXT("Sprain")); }
+
+void ALightkeeperCharacter::Debug_AddInjury(FString InjuryName)
+{
+	if (!HealthComp)
+	{
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red, TEXT("[DEBUG] Brak HealthComponent na graczu!"));
+		return;
+	}
+
+	InjuryName = InjuryName.TrimStartAndEnd();
+	FGameplayTag Tag;
+
+	// 1. Pełny tag (np. Status.Injury.Minor.LeftArm):
+	if (InjuryName.StartsWith(TEXT("Status.")))
+	{
+		Tag = FGameplayTag::RequestGameplayTag(*InjuryName, false);
+	}
+	// 2. Jeśli wpisano z przedrostkiem Minor (np. MinorLeftArm, MinorChest, MinorHead):
+	else if (InjuryName.StartsWith(TEXT("Minor"), ESearchCase::IgnoreCase))
+	{
+		FString PureName = InjuryName.RightChop(5); // Usuwa słowo "Minor"
+		FString FullTagStr = FString::Printf(TEXT("Status.Injury.Minor.%s"), *PureName);
+		Tag = FGameplayTag::RequestGameplayTag(*FullTagStr, false);
+	}
+	// 3. Drobne urazy po pojedynczych nazwach:
+	else if (InjuryName.Equals(TEXT("Sprain"), ESearchCase::IgnoreCase) ||
+		InjuryName.Equals(TEXT("Bleeding"), ESearchCase::IgnoreCase) ||
+		InjuryName.Equals(TEXT("Burns"), ESearchCase::IgnoreCase) ||
+		InjuryName.Equals(TEXT("Arrhythmia"), ESearchCase::IgnoreCase) ||
+		InjuryName.Equals(TEXT("TrenchFoot"), ESearchCase::IgnoreCase) ||
+		InjuryName.Equals(TEXT("SootLungs"), ESearchCase::IgnoreCase))
+	{
+		FString FullTagStr = FString::Printf(TEXT("Status.Injury.Minor.%s"), *InjuryName);
+		Tag = FGameplayTag::RequestGameplayTag(*FullTagStr, false);
+	}
+	// 4. Domyślnie Major (np. Legs, RightArm, LeftArm, Chest, Head):
+	else
+	{
+		FString FullTagStr = FString::Printf(TEXT("Status.Injury.Major.%s"), *InjuryName);
+		Tag = FGameplayTag::RequestGameplayTag(*FullTagStr, false);
+	}
+
+	// WERYFIKACJA I DIAGNOSTYKA:
+	if (!Tag.IsValid())
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow,
+				FString::Printf(TEXT("⚠️ [DEBUG] Nie znaleziono tagu dla nazwy: '%s'!"), *InjuryName));
+		}
+		return;
+	}
+
+	if (HealthComp->ActiveInjuries.HasTagExact(Tag))
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				FString::Printf(TEXT("ℹ️ [DEBUG] Gracz JUŻ MA ten uraz: %s! (Wciśnij NumPad 0 aby zresetować)"), *Tag.ToString()));
+		}
+		return;
+	}
+
+	HealthComp->AddInjury(Tag);
+	UpdateMovementSpeed();
+}
+
+void ALightkeeperCharacter::Debug_ClearInjuries()
+{
+	if (HealthComp)
+	{
+		HealthComp->ActiveInjuries.Reset();
+		UpdateMovementSpeed();
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Green, TEXT("[DEBUG] Usunięto wszystkie urazy!"));
+	}
+}
+
+void ALightkeeperCharacter::Debug_TestLaudanum()
+{
+	if (HealthComp) HealthComp->UseLaudanum(10.0f); // 10 sekund do szybkiego testu crasha!
+}
+
+void ALightkeeperCharacter::Debug_TestBandage()
+{
+	if (HealthComp) HealthComp->UseBandage(35.0f);
 }

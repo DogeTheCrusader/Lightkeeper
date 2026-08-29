@@ -1,4 +1,6 @@
 ﻿#include "BaseInteractable.h"
+#include "LightkeeperCharacter.h"
+#include "BaseTool.h"
 #include "LanternComponent.h"
 #include "SanityComponent.h"
 #include "HealthComponent.h"
@@ -6,7 +8,12 @@
 #include "ReactionReceiverComponent.h"
 #include "InventoryComponent.h"
 #include "SafeLightComponent.h"
+#include "MetroidvaniaGateComponent.h"
+#include "ProgressionComponent.h"
+#include "ToolManagerComponent.h"
+#include "ImSimSensorySubsystem.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "Engine/OverlapResult.h"      
 #include "TimerManager.h"
@@ -20,13 +27,14 @@ ABaseInteractable::ABaseInteractable()
 	HealthComp = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	ReactionComp = CreateDefaultSubobject<UReactionReceiverComponent>(TEXT("ReactionReceiverComponent"));
 
-	// Domyślny filtr zagrożeń blokujący podnoszenie [E]
 	BlockingHazardStates.AddTag(FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard"), false));
 }
 
 void ABaseInteractable::BeginPlay()
 {
 	Super::BeginPlay();
+
+	GateComp = FindComponentByClass<UMetroidvaniaGateComponent>();
 
 	if (HealthComp)
 	{
@@ -38,104 +46,129 @@ void ABaseInteractable::BeginPlay()
 		ReactionComp->OnStateApplied.AddDynamic(this, &ABaseInteractable::HandleStateApplied);
 	}
 
-	// ====================================================================
-	// 1. REJESTROWANIE ZDERZEŃ DLA BRYŁ
-	// ====================================================================
 	TArray<UPrimitiveComponent*> PrimComps;
 	GetComponents<UPrimitiveComponent>(PrimComps);
 	for (UPrimitiveComponent* Prim : PrimComps)
 	{
 		if (Prim)
 		{
+			if (Prim->IsA<USafeLightComponent>()) continue;
+
 			Prim->SetNotifyRigidBodyCollision(true);
 			Prim->OnComponentHit.AddDynamic(this, &ABaseInteractable::OnHit);
+
+			Prim->SetCanEverAffectNavigation(true);
+
+			if (Prim->IsSimulatingPhysics())
+			{
+				Prim->SetLinearDamping(0.01f);
+				Prim->SetAngularDamping(0.05f);
+				Prim->SetUseCCD(true);
+				Prim->BodyInstance.bUseCCD = true;
+				Prim->BodyInstance.SetMaxDepenetrationVelocity(250.0f);
+				Prim->WakeRigidBody();
+			}
 		}
 	}
 
-	// ====================================================================
-	// 2. IMSIM: ODPAŁKA STREF CIĄGŁYCH (Pęknięte rury z parą, Ogniska)
-	// ====================================================================
-	if (bIsStateEmitter && TriggerType == EEmissionTrigger::ContinuousZone)
+	if (ItemData.bIsStateEmitter && ItemData.TriggerType == EEmissionTrigger::ContinuousZone)
 	{
-		GetWorld()->GetTimerManager().SetTimer(ContinuousTimerHandle, this, &ABaseInteractable::TriggerStateEmission, EmissionInterval, true);
+		GetWorld()->GetTimerManager().SetTimer(ContinuousTimerHandle, this, &ABaseInteractable::TriggerStateEmission, 0.5f, true);
 	}
 }
 
 void ABaseInteractable::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	/*
-#if !UE_BUILD_SHIPPING
-	// Wyświetlamy stan diagnostyczny dla Szuflad, Drzwi i trzymanych obiektów:
-	if (bIsHeld || InteractionType == EInteractionType::Translation || InteractionType == EInteractionType::Hinge)
-	{
-		if (GEngine)
-		{
-			FString LatchedStr = bIsLatched ? TEXT("TRUE (Zatrzasniete)") : TEXT("FALSE (Uchylone)");
-			FString HeldStr = bIsHeld ? TEXT("TRUE (Trzymasz)") : TEXT("FALSE (Puszczone)");
-			FString LockedStr = bIsLocked ? TEXT("TRUE (Zaryglowane)") : TEXT("FALSE");
-
-			FColor StatusColor = bIsLatched ? FColor::Green : FColor::Orange;
-
-			GEngine->AddOnScreenDebugMessage(
-				(uint64)GetUniqueID(), // RZUTOWANIE NA uint64 ROZWIĄZUJE BŁĄD KOMPILACJI!
-				0.0f,                  // 0.0s = odświeża się co klatkę bez spamu
-				StatusColor,
-				FString::Printf(TEXT("[%s] IsLatched: %s | IsHeld: %s | IsLocked: %s"),
-					*GetName(), *LatchedStr, *HeldStr, *LockedStr)
-			);
-		}
-	}
-#endif*/
 }
 
 void ABaseInteractable::HandleStateApplied(FGameplayTag StateTag, float Intensity)
 {
-	// Szybkie pobranie tagu z pamięci (optymalizacja dla procesora):
-	static const FGameplayTag ThermalTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Thermal"), false);
-
-	if (StateTag.MatchesTag(ThermalTag))
-	{
-		// 1. OBRAŻENIA: Zadajemy TYLKO jeśli ściana ma zaznaczone bCanBeDestroyed = true!
-		// Ponieważ Twoja ściana ma bCanBeDestroyed = FALSE -> ta linijka zostanie zignorowana (ściana nigdy nie zniknie z mapy!)
-		if (bCanBeDestroyed && HealthComp)
-		{
-			float FinalDamage = (25.0f * Intensity) * CustomDamageMultiplier;
-			HealthComp->TakeDamage(FinalDamage, StateTag);
-		}
-
-		// 2. EFEKT WIZUALNY I ŚWIATŁO: Odpala się ZA KAŻDYM RAZEM, gdy podpalisz ścianę!
-		if (USafeLightComponent* LightZone = FindComponentByClass<USafeLightComponent>())
-		{
-			LightZone->SetLightActive(true);
-			LightZone->SetDynamicRadius(350.0f * Intensity);
-		}
-	}
 }
 
 void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// ====================================================================
-	// 1. ZABEZPIECZENIA PRZED EXPLOITAMI I IMMUNITETY
-	// ====================================================================
-	if (bIsHeld || bIsBroken) return;
+	if (bIsBroken) return;
 	if (!OtherActor || OtherActor == this) return;
-	if (OtherActor->IsA<APawn>()) return; // Gracz dotykający skrzynki jej nie niszczy
 
-	// Obiekty przypięte do siebie (np. zasuwka na drzwiach) nie mogą się niszczyć:
 	if (IsAttachedTo(OtherActor) || OtherActor->IsAttachedTo(this)) return;
 	if (GetAttachParentActor() == OtherActor || OtherActor->GetAttachParentActor() == this) return;
+	if (GetWorld()->GetTimeSeconds() < 0.3f) return;
 
-	if (GetGameTimeSinceCreation() < 0.2f) return;
-
-	if (ABaseInteractable* OtherInteractable = Cast<ABaseInteractable>(OtherActor))
+	if (Hit.bBlockingHit)
 	{
-		if (OtherInteractable->bIsHeld || OtherInteractable->bIsBroken) return;
+		LastImpactNormal = Hit.ImpactNormal;
+	}
+
+	ABaseInteractable* OtherInteractable = Cast<ABaseInteractable>(OtherActor);
+	const bool bOtherHeld = OtherInteractable && OtherInteractable->bIsHeld;
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+
+	// 1. BLOKADA SPYCHACZA:
+	if (this->bIsHeld || bOtherHeld) return;
+
+	// ====================================================================
+	// 2. PRAWDZIWA PRĘDKOŚĆ LOTU (BEZ FAŁSZYWYCH IMPULSÓW CHAOSU):
+	// ====================================================================
+	FVector MyVel = HitComponent ? HitComponent->GetComponentVelocity() : FVector::ZeroVector;
+	float ImpactSpeed = MyVel.Size(); // Prawdziwa prędkość lotu w centymetrach/sekundę!
+	float ActualMass = (HitComponent && HitComponent->IsSimulatingPhysics()) ? HitComponent->GetMass() : ReferenceMass;
+
+	// ====================================================================
+	// 3. HAŁAS DLA AI (Tylko uderzenia z prędkością >= 240 cm/s):
+	// ====================================================================
+	if (ImpactSpeed >= 55.0f && (CurrentTime - LastNoiseTime > 0.25f))
+	{
+		float MassFactor = FMath::Clamp(FMath::Sqrt(ActualMass / 2.0f), 0.45f, 3.5f);
+		float CalculatedNoiseRadius = (ImpactSpeed * MassFactor) * 0.9f;
+
+		// Rejestrujemy nawet mały hałas FootKickera (od 45 cm w górę):
+		if (CalculatedNoiseRadius >= 45.0f)
+		{
+			LastNoiseTime = CurrentTime;
+
+			if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+			{
+				static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+				FVector SoundLoc = Hit.ImpactPoint.IsNearlyZero() ? GetActorLocation() : FVector(Hit.ImpactPoint);
+				float FinalNoiseRadius = FMath::Clamp(CalculatedNoiseRadius, 45.0f, 2200.0f);
+
+				Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag);
+			}
+		}
 	}
 
 	// ====================================================================
-	// 2. IMSIM: PRZEKAZYWANIE STANU PRZEZ KONTAKT (Płonąca deska / Prąd)
+	// 4. DETONACJA WYBUCHU (OnImpact):
 	// ====================================================================
+	if (ItemData.bIsStateEmitter && ItemData.TriggerType == EEmissionTrigger::OnImpact)
+	{
+		const float DetonationThreshold = 200.0f;
+
+		if (CurrentTime - LastEmissionTime < 0.5f) return;
+
+		if (ImpactSpeed >= DetonationThreshold)
+		{
+			LastEmissionTime = CurrentTime;
+
+#if !UE_BUILD_SHIPPING
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(
+					(uint64)GetUniqueID() + 500,
+					2.5f,
+					FColor::Green,
+					FString::Printf(TEXT("💥 [%s] Prędkość: %.1f / %.1f cm/s | DETONACJA / WYBUCH!"),
+						*GetName(), ImpactSpeed, DetonationThreshold)
+				);
+			}
+#endif
+			TriggerStateEmission();
+			return;
+		}
+	}
+
+	// 5. PRZEKAZYWANIE STANÓW CHEMICZNYCH:
 	if (ReactionComp)
 	{
 		static const FGameplayTag BurningTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
@@ -144,7 +177,6 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 		static const FGameplayTag ElectrocutedTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
 		static const FGameplayTag CurrentElementTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Electricity.Current"), false);
 
-		// A. Jeśli PŁONIEMY -> podpalamy cel:
 		if (ReactionComp->HasState(BurningTag))
 		{
 			if (UReactionReceiverComponent* TargetReceiver = OtherActor->FindComponentByClass<UReactionReceiverComponent>())
@@ -153,7 +185,6 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 			}
 		}
 
-		// B. Jeśli jesteśmy NAELEKTRYZOWANI i z METALU -> przewodzimy prąd:
 		if (MaterialTag.MatchesTag(MetalTag) && ReactionComp->HasState(ElectrocutedTag))
 		{
 			if (UReactionReceiverComponent* TargetReceiver = OtherActor->FindComponentByClass<UReactionReceiverComponent>())
@@ -164,70 +195,75 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	}
 
 	// ====================================================================
-	// 3. FIZYKA OBRAŻEŃ (OPARTA NA RZECZYWISTEJ PRĘDKOŚCI LOTU)
+	// 6. UDERZENIE W POTWORA (ZADANIE OBRAŻEŃ DLA APawn):
 	// ====================================================================
-	FVector MyVel = HitComponent ? HitComponent->GetComponentVelocity() : FVector::ZeroVector;
-	FVector OtherVel = OtherComp ? OtherComp->GetComponentVelocity() : FVector::ZeroVector;
-
-	float ImpactSpeed = (MyVel - OtherVel).Size();
-
-	// Jeśli zderzamy się ze statycznym otoczeniem (podłoga / ściana):
-	if (OtherComp && OtherComp->IsWorldGeometry())
+	if (APawn* HitPawn = Cast<APawn>(OtherActor))
 	{
-		// Bierzemy TYLKO naszą prędkość uderzenia w płaszczyznę:
-		ImpactSpeed = FMath::Abs(FVector::DotProduct(MyVel, Hit.ImpactNormal));
-	}
+		if (bIsHeld) return;
+		if (CurrentTime - LastHitTime < 0.35f) return;
 
-	// ====================================================================
-	// REALISTYCZNE PROGI PRĘDKOŚCI:
-	// Szkło pęka przy locie 150 cm/s. 
-	// Drewno/Metal wymaga prawdziwego uderzenia min. 500 cm/s (5 m/s - rzut lub upadek z wysokości!)
-	// ====================================================================
-	float MinSpeedToDamage = 500.0f;
-	if (DamageSusceptibility > 2.0f) // Kruche rzeczy (Szkło)
-	{
-		MinSpeedToDamage = 150.0f;
-	}
-
-	// Jeśli prędkość jest poniżej progu (np. stawanie nogą = ~350 cm/s) -> ZERO OBRAŻEŃ!
-	if (ImpactSpeed < MinSpeedToDamage) return;
-
-	float CurrentTime = GetWorld()->GetTimeSeconds();
-	if (CurrentTime - LastHitTime < 0.15f) return;
-	LastHitTime = CurrentTime;
-
-	// Emisja przy uderzeniu (np. dzwon):
-	if (bIsStateEmitter && TriggerType == EEmissionTrigger::OnImpact)
-	{
-		TriggerStateEmission();
-	}
-
-	// Obliczamy energię kinetyczną:
-	float ActualMass = (HitComponent && HitComponent->IsSimulatingPhysics()) ? HitComponent->GetMass() : ReferenceMass;
-	float ExcessSpeed = ImpactSpeed - MinSpeedToDamage;
-	float KineticEnergy = (ExcessSpeed * 0.1f) * (ActualMass / 10.0f);
-
-	// A. Obrażenia własne (np. zrzucenie skrzynki z 2 piętra na beton):
-	if (bCanBeDestroyed && HealthComp)
-	{
-		float FinalSelfDamage = KineticEnergy * DamageSusceptibility * CustomDamageMultiplier;
-		if (FinalSelfDamage > 2.0f)
+		// Rzucony obiekt uderza potwora z prędkością >= 250 cm/s:
+		if (ImpactSpeed >= 140.0f)
 		{
-			HealthComp->TakeDamage(FinalSelfDamage, FGameplayTag());
-		}
-	}
+			LastHitTime = CurrentTime;
 
-	// B. Obrażenia celu (np. rzucenie skrzynią w drzwi):
-	if (ABaseInteractable* TargetInteractable = Cast<ABaseInteractable>(OtherActor))
-	{
-		if (TargetInteractable->bCanBeDestroyed && TargetInteractable->HealthComp)
-		{
-			float FinalTargetDamage = KineticEnergy * ImpactHardness * TargetInteractable->DamageSusceptibility * TargetInteractable->CustomDamageMultiplier;
-			if (FinalTargetDamage > 2.0f)
+			if (UHealthComponent* PawnHealth = HitPawn->FindComponentByClass<UHealthComponent>())
 			{
-				TargetInteractable->HealthComp->TakeDamage(FinalTargetDamage, FGameplayTag());
+				static const FGameplayTag BluntTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
+				float RawDamage = (ImpactSpeed - 180.0f) * 0.035f * FMath::Sqrt(ActualMass / 6.0f);
+				float DamageToPawn = FMath::Clamp(RawDamage, 10.0f, 25.0f);
+
+				PawnHealth->TakeDamage(DamageToPawn, BluntTag, Hit);
+
+#if !UE_BUILD_SHIPPING
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Orange,
+						FString::Printf(TEXT("🎯 [%s] Trafiono potwora %s! Obrażenia: -%.1f HP"),
+							*GetName(), *HitPawn->GetName(), DamageToPawn));
+				}
+#endif
 			}
 		}
+		return;
+	}
+
+	// ====================================================================
+	// 7. OBRAŻENIA MECHANICZNE DLA DRZWI I MEBLI (35 - 45 HP):
+	// ====================================================================
+	float BaseMinSpeed = 450.0f;
+	if (HealthComp && HealthComp->DamageSusceptibility > 2.0f)
+	{
+		BaseMinSpeed = 150.0f;
+	}
+
+	float MassDivisor = FMath::Sqrt(FMath::Max(1.0f, ActualMass / 6.0f));
+	float MinSpeedToDamage = FMath::Clamp(BaseMinSpeed / MassDivisor, 180.0f, BaseMinSpeed);
+
+	if (ImpactSpeed < MinSpeedToDamage) return;
+
+	if (CurrentTime - LastHitTime < 0.35f) return;
+	LastHitTime = CurrentTime;
+
+	float ExcessSpeed = ImpactSpeed - MinSpeedToDamage;
+	float RawKineticEnergy = (ExcessSpeed * 0.08f) * FMath::Sqrt(ActualMass / 6.0f);
+
+	if (RawKineticEnergy < 8.0f) return;
+
+	float MaxDamageCap = (HealthComp && HealthComp->DamageSusceptibility > 2.0f) ? 60.0f : 45.0f;
+	float KineticEnergy = FMath::Clamp(RawKineticEnergy, 8.0f, MaxDamageCap);
+
+	static const FGameplayTag BluntDamageTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
+
+	if (HealthComp)
+	{
+		HealthComp->TakeDamage(KineticEnergy, BluntDamageTag);
+	}
+
+	if (UHealthComponent* TargetHealth = OtherActor->FindComponentByClass<UHealthComponent>())
+	{
+		float IncomingDamageToTarget = KineticEnergy * ImpactHardness;
+		TargetHealth->TakeDamage(IncomingDamageToTarget, BluntDamageTag);
 	}
 }
 
@@ -236,8 +272,7 @@ void ABaseInteractable::HandleDeath()
 	if (bIsBroken) return;
 	bIsBroken = true;
 
-	// Jeśli to obiekt niszczący się z wybuchem (Mołotow / Butelka z kwasem):
-	if (bIsStateEmitter && TriggerType == EEmissionTrigger::OnDestroy)
+	if (ItemData.bIsStateEmitter && ItemData.TriggerType == EEmissionTrigger::OnDestroy)
 	{
 		TriggerStateEmission();
 		return;
@@ -256,21 +291,71 @@ void ABaseInteractable::HandleDeath()
 	Destroy();
 }
 
-// ====================================================================
-// GŁÓWNA EMISJA ŻYWIOŁÓW (ImSim Emitter)
-// ====================================================================
 void ABaseInteractable::TriggerStateEmission()
 {
-	if (!EmittedStateTag.IsValid()) return;
+	if (!ItemData.bIsStateEmitter) return;
 
 	FVector EmissionLocation = GetActorLocation();
+	FVector EmissionForward = GetActorForwardVector();
+	FRotator EmissionRotation = GetActorRotation();
+
 	if (UPrimitiveComponent* PrimComp = FindComponentByClass<UPrimitiveComponent>())
 	{
-		EmissionLocation = PrimComp->GetComponentLocation();
+		if (ItemData.EmissionSocketName != NAME_None && PrimComp->DoesSocketExist(ItemData.EmissionSocketName))
+		{
+			EmissionLocation = PrimComp->GetSocketLocation(ItemData.EmissionSocketName);
+			EmissionForward = PrimComp->GetSocketRotation(ItemData.EmissionSocketName).Vector();
+			EmissionRotation = PrimComp->GetSocketRotation(ItemData.EmissionSocketName);
+		}
+		else
+		{
+			EmissionLocation = PrimComp->GetComponentLocation();
+
+			if (ItemData.bAlignToSurfaceNormal)
+			{
+				FVector SurfaceNormal = LastImpactNormal.IsNearlyZero() ? FVector::UpVector : LastImpactNormal;
+				EmissionRotation = FRotationMatrix::MakeFromZ(SurfaceNormal).Rotator();
+				EmissionForward = SurfaceNormal;
+			}
+			else
+			{
+				EmissionForward = GetActorForwardVector();
+				EmissionRotation = GetActorRotation();
+			}
+		}
 	}
 
-	TArray<FOverlapResult> Overlaps;
-	FCollisionShape Sphere = FCollisionShape::MakeSphere(SplashRadius);
+	// ====================================================================
+	// W 100% DYNAMICZNY HAŁAS WYBUCHU (Zależy od DMG, Promienia i Mocy Żywiołu):
+	// ====================================================================
+	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	{
+		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+
+		// Wyliczamy hałas: Promień rozprysku + Siła obrażeń * Mnożnik intensywności
+		float DynamicExplosionNoise = (ItemData.SplashRadius * 3.0f) + (ItemData.EmissionBurstDamage * 25.0f);
+		DynamicExplosionNoise *= FMath::Max(1.0f, ItemData.EmissionStateIntensity);
+
+		// Zabezpieczenie limitu (od 6m dla małych fiolek do 50m dla wielkich kotłów):
+		float FinalNoiseRadius = FMath::Clamp(DynamicExplosionNoise, 600.0f, 5000.0f);
+
+		Sensory->RegisterNoise(EmissionLocation, FinalNoiseRadius, NoiseTag);
+
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+				FString::Printf(TEXT("💥 [%s] EKSPLOZJA! DMG: %.0f | Zasięg fali: %.0f cm (%.1f m)"),
+					*GetName(), ItemData.EmissionBurstDamage, FinalNoiseRadius, FinalNoiseRadius / 100.0f));
+		}
+#endif
+	}
+
+	if (ItemData.bInvertEmissionDirection)
+	{
+		EmissionForward = -EmissionForward;
+		EmissionRotation = EmissionForward.Rotation();
+	}
 
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
@@ -281,35 +366,193 @@ void ABaseInteractable::TriggerStateEmission()
 	ObjectQueryParams.AddObjectTypesToQuery(ECC_PhysicsBody);
 	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
 
-	if (GetWorld()->OverlapMultiByObjectType(Overlaps, EmissionLocation, FQuat::Identity, ObjectQueryParams, Sphere, Params))
+	if (ItemData.EmissionShape == EEmissionShape::LineLaser)
 	{
-		for (const FOverlapResult& Hit : Overlaps)
+		FVector End = EmissionLocation + (EmissionForward * ItemData.SplashRadius);
+		FHitResult Hit;
+
+		if (GetWorld()->LineTraceSingleByObjectType(Hit, EmissionLocation, End, ObjectQueryParams, Params))
 		{
 			if (AActor* HitActor = Hit.GetActor())
 			{
-				if (UReactionReceiverComponent* Receiver = HitActor->FindComponentByClass<UReactionReceiverComponent>())
+				if (ItemData.EmittedStateTag.IsValid())
 				{
-					Receiver->ApplyStateImpact(EmittedStateTag, SplashIntensity);
+					if (UReactionReceiverComponent* Receiver = HitActor->FindComponentByClass<UReactionReceiverComponent>())
+					{
+						Receiver->ApplyStateImpact(ItemData.EmittedStateTag, ItemData.EmissionStateIntensity);
+					}
+				}
+
+				if (ItemData.EmissionBurstDamage > 0.0f)
+				{
+					if (UHealthComponent* TargetHealth = HitActor->FindComponentByClass<UHealthComponent>())
+					{
+						TargetHealth->TakeDamage(ItemData.EmissionBurstDamage, ItemData.EmittedStateTag);
+					}
 				}
 			}
 		}
-	}
 
 #if !UE_BUILD_SHIPPING
-	DrawDebugSphere(GetWorld(), EmissionLocation, SplashRadius, 16, FColor::Red, false, 2.0f);
+		DrawDebugLine(GetWorld(), EmissionLocation, End, FColor::Red, false, 1.5f, 0, 2.0f);
 #endif
+	}
+	else
+	{
+		TArray<FOverlapResult> Overlaps;
+		FCollisionShape OverlapShape;
 
-	// Niszczymy obiekt TYLKO jeśli ma zaznaczone bDestroyOnEmission:
-	if (bDestroyOnEmission && (TriggerType == EEmissionTrigger::OnDestroy || TriggerType == EEmissionTrigger::TimedFuse || TriggerType == EEmissionTrigger::Proximity))
+		if (ItemData.EmissionShape == EEmissionShape::BoxVolume)
+		{
+			OverlapShape = FCollisionShape::MakeBox(ItemData.BoxEmissionExtents);
+		}
+		else if (ItemData.EmissionShape == EEmissionShape::CylinderDisc)
+		{
+			OverlapShape = FCollisionShape::MakeBox(FVector(ItemData.SplashRadius, ItemData.SplashRadius, ItemData.DiscHeight));
+		}
+		else
+		{
+			OverlapShape = FCollisionShape::MakeSphere(ItemData.SplashRadius);
+		}
+
+		if (GetWorld()->OverlapMultiByObjectType(Overlaps, EmissionLocation, EmissionRotation.Quaternion(), ObjectQueryParams, OverlapShape, Params))
+		{
+			float ConeLimit = FMath::Cos(FMath::DegreesToRadians(ItemData.StreamConeAngle));
+			TSet<AActor*> ProcessedActors;
+
+			for (const FOverlapResult& Hit : Overlaps)
+			{
+				if (AActor* HitActor = Hit.GetActor())
+				{
+					if (ProcessedActors.Contains(HitActor)) continue;
+					ProcessedActors.Add(HitActor);
+
+					if (ItemData.EmissionShape == EEmissionShape::DirectionalCone)
+					{
+						FVector DirToTarget = (HitActor->GetActorLocation() - EmissionLocation).GetSafeNormal();
+						float Dot = FVector::DotProduct(EmissionForward, DirToTarget);
+						if (Dot < ConeLimit) continue;
+					}
+
+					if (ItemData.EmissionShape == EEmissionShape::CylinderDisc)
+					{
+						FVector LocalPos = EmissionRotation.UnrotateVector(HitActor->GetActorLocation() - EmissionLocation);
+						float Dist2D = FVector2D(LocalPos.X, LocalPos.Y).Size();
+						float DistZ = FMath::Abs(LocalPos.Z);
+
+						if (Dist2D > ItemData.SplashRadius || DistZ > ItemData.DiscHeight) continue;
+					}
+
+					if (ItemData.EmittedStateTag.IsValid())
+					{
+						if (UReactionReceiverComponent* Receiver = HitActor->FindComponentByClass<UReactionReceiverComponent>())
+						{
+							Receiver->ApplyStateImpact(ItemData.EmittedStateTag, 1.0f);
+						}
+					}
+
+					if (ItemData.EmissionBurstDamage > 0.0f)
+					{
+						if (UHealthComponent* TargetHealth = HitActor->FindComponentByClass<UHealthComponent>())
+						{
+							TargetHealth->TakeDamage(ItemData.EmissionBurstDamage, ItemData.EmittedStateTag);
+						}
+					}
+				}
+			}
+		}
+
+#if !UE_BUILD_SHIPPING
+		if (ItemData.EmissionShape == EEmissionShape::CylinderDisc)
+		{
+			FVector CylinderNormal = EmissionForward.IsNearlyZero() ? FVector::UpVector : EmissionForward;
+			FVector CylinderStart = EmissionLocation - (CylinderNormal * ItemData.DiscHeight);
+			FVector CylinderEnd = EmissionLocation + (CylinderNormal * ItemData.DiscHeight);
+			DrawDebugCylinder(GetWorld(), CylinderStart, CylinderEnd, ItemData.SplashRadius, 24, FColor::Red, false, 2.0f);
+		}
+		else if (ItemData.EmissionShape == EEmissionShape::BoxVolume)
+		{
+			DrawDebugBox(GetWorld(), EmissionLocation, ItemData.BoxEmissionExtents, EmissionRotation.Quaternion(), FColor::Red, false, 1.5f);
+		}
+		else if (ItemData.EmissionShape == EEmissionShape::DirectionalCone)
+		{
+			DrawDebugCone(GetWorld(), EmissionLocation, EmissionForward, ItemData.SplashRadius, FMath::DegreesToRadians(ItemData.StreamConeAngle), FMath::DegreesToRadians(ItemData.StreamConeAngle), 16, FColor::Red, false, 1.5f);
+		}
+		else
+		{
+			DrawDebugSphere(GetWorld(), EmissionLocation, ItemData.SplashRadius, 16, FColor::Red, false, 2.0f);
+		}
+#endif
+	}
+
+	if (ItemData.bIsPersistentZone)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			if (!World->GetTimerManager().IsTimerActive(ZoneExpiryTimerHandle))
+			{
+				if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetRootComponent()))
+				{
+					Prim->SetSimulatePhysics(false);
+					Prim->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					Prim->SetVisibility(false);
+				}
+
+				World->GetTimerManager().SetTimer(ContinuousTimerHandle, this, &ABaseInteractable::TriggerStateEmission, 0.5f, true);
+				World->GetTimerManager().SetTimer(ZoneExpiryTimerHandle, this, &ABaseInteractable::EndPersistentZone, ItemData.EmissionDuration, false);
+
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Orange,
+						FString::Printf(TEXT("[%s] Strefa płonie przez %.1fs!"), *GetName(), ItemData.EmissionDuration));
+				}
+				return;
+			}
+		}
+		return;
+	}
+
+	if (ItemData.bDestroyOnEmission && (ItemData.TriggerType == EEmissionTrigger::OnImpact ||
+		ItemData.TriggerType == EEmissionTrigger::OnDestroy ||
+		ItemData.TriggerType == EEmissionTrigger::TimedFuse ||
+		ItemData.TriggerType == EEmissionTrigger::Proximity))
 	{
 		bIsBroken = true;
 		Destroy();
 	}
 }
 
+void ABaseInteractable::EndPersistentZone()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ContinuousTimerHandle);
+		World->GetTimerManager().ClearTimer(ZoneExpiryTimerHandle);
+	}
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, FString::Printf(TEXT("[%s] Strefa wygasła."), *GetName()));
+	}
+
+	if (ItemData.bDestroyOnEmission)
+	{
+		bIsBroken = true;
+		Destroy();
+	}
+	else
+	{
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetRootComponent()))
+		{
+			Prim->SetVisibility(true);
+			Prim->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		}
+	}
+}
+
 void ABaseInteractable::DeactivateEmitter()
 {
-	bIsStateEmitter = false;
+	ItemData.bIsStateEmitter = false;
 	GetWorld()->GetTimerManager().ClearTimer(ContinuousTimerHandle);
 	GetWorld()->GetTimerManager().ClearTimer(FuseTimerHandle);
 }
@@ -319,7 +562,6 @@ float ABaseInteractable::CalculateMovementResistance(UPrimitiveComponent* Moving
 	if (!MovingComponent) return 1.0f;
 
 	float MassMultiplier = 1.0f;
-
 	if (MovingComponent->IsSimulatingPhysics())
 	{
 		float ActualMass = FMath::Max(1.0f, MovingComponent->GetMass());
@@ -327,194 +569,36 @@ float ABaseInteractable::CalculateMovementResistance(UPrimitiveComponent* Moving
 		MassMultiplier = FMath::Clamp(MassRatio, 0.2f, 1.5f);
 	}
 
-	float FinalMultiplier = MassMultiplier / FMath::Max(0.1f, MechanicalFriction);
-	return FinalMultiplier;
+	return MassMultiplier / FMath::Max(0.1f, MechanicalFriction);
 }
 
-// ====================================================================
-// SYSTEM EKWIPUNKU [E]
-// ====================================================================
 bool ABaseInteractable::CanBePocketed_Implementation()
 {
-	if (!bCanBePocketed)
-	{
-		return false;
-	}
+	if (!bCanBePocketed) return false;
 
 	if (ReactionComp)
 	{
-		if (ReactionComp->ActiveStates.HasAny(BlockingHazardStates))
-		{
-			return false;
-		}
+		if (ReactionComp->ActiveStates.HasAny(BlockingHazardStates)) return false;
 	}
 
 	return true;
 }
 
-// ====================================================================
-// 1. UŻYCIE KLUCZA Z DŁONI (Otwieranie i Zamykanie z Ręki)
-// ====================================================================
-bool ABaseInteractable::TryUnlockWithKey(AActor* KeyActor, AActor* InstigatorActor)
-{
-	if (!RequiredKeyTag.IsValid()) return false;
-
-	if (ABaseInteractable* KeyInteractable = Cast<ABaseInteractable>(KeyActor))
-	{
-		// Sprawdzamy czy tag trzymanego klucza pasuje do zamka:
-		if (KeyInteractable->ItemData.ItemTag.MatchesTag(RequiredKeyTag))
-		{
-			// FIZYKA: Drzwi (Hinge) i Szuflady (Translation) muszą być domknięte, by je zaryglować!
-			bool bRequiresClosedPosition = (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation);
-
-			if (bRequiresClosedPosition && !bIsLocked && !bIsLatched)
-			{
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("[ZAMEK] Musisz najpierw domknac drzwi/szuflade, aby przekrecic klucz!"));
-				}
-				return false;
-			}
-
-			// PRZEŁĄCZAMY STAN ZAMKA:
-			bIsLocked = !bIsLocked;
-			bKeyDiscovered = true; // ZAPAMIĘTUJEMY ZAMEK NA ZAWSZE!
-
-			if (GEngine)
-			{
-				if (bIsLocked)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan, TEXT("[ZAMEK] Zaryglowano na klucz!"));
-				}
-				else
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, TEXT("[SUKCES] Odryglowano kluczem!"));
-				}
-			}
-
-			// Automatycznie chowamy użyty klucz do plecaka, żeby nie zginął:
-			if (InstigatorActor)
-			{
-				if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
-				{
-					if (InvComp->TryAddItem(KeyInteractable->ItemData))
-					{
-						KeyActor->Destroy();
-						return true;
-					}
-				}
-			}
-
-			return true;
-		}
-	}
-
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Red, TEXT("[BLAD] Ten klucz nie pasuje do tego zamka!"));
-	}
-
-	return false;
-}
-
-// ====================================================================
-// 2. INTERAKCJA POD KLAWISZEM [E] (Podnoszenie lub Ryglowanie z Plecaka)
-// ====================================================================
 void ABaseInteractable::PickupObject_Implementation(AActor* InstigatorActor)
 {
 	if (!InstigatorActor) return;
 
-	// --------------------------------------------------------------------
-	// A. DLA DRZWI / SZUFLAD / ZAWORÓW (Obiekty nie do kieszeni)
-	// --------------------------------------------------------------------
-	if (!bCanBePocketed)
+	// Jeśli przedmiot nie jest przeznaczony do kieszeni (np. heavy szafa / drzwi) -> ignoruj
+	if (!bCanBePocketed || !CanBePocketed_Implementation()) return;
+
+	// Chowamy przedmiot do plecaka gracza:
+	if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
 	{
-		if (RequiredKeyTag.IsValid())
-		{
-			// Z plecaka możemy ryglować/odryglowywać TYLKO jeśli zamek został wcześniej odkryty:
-			if (bKeyDiscovered && InstigatorActor)
-			{
-				if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
-				{
-					if (InvComp->HasItemWithTag(RequiredKeyTag))
-					{
-						// FIZYKA: Blokujemy ryglowanie, jeśli drzwi/szuflada nie są domknięte:
-						bool bRequiresClosedPosition = (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation);
-
-						if (bRequiresClosedPosition && !bIsLocked && !bIsLatched)
-						{
-							if (GEngine)
-							{
-								GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, TEXT("[ZAMEK] Musisz najpierw domknac drzwi/szuflade, aby przekrecic klucz!"));
-							}
-							return;
-						}
-
-						bIsLocked = !bIsLocked; // Przełącz stan zamka
-
-						if (GEngine)
-						{
-							if (bIsLocked)
-							{
-								GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Cyan, TEXT("[ZAMEK] Zaryglowano zapamietanym kluczem z plecaka!"));
-							}
-							else
-							{
-								GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, TEXT("[ZAMEK] Odryglowano zapamietanym kluczem z plecaka!"));
-							}
-						}
-						return;
-					}
-				}
-			}
-			else
-			{
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, TEXT("[ZAMEK] Nie znasz jeszcze tego zamka. Musisz dopasowac klucz z dloni!"));
-				}
-				return;
-			}
-		}
-
-		return;
-	}
-
-	// --------------------------------------------------------------------
-	// B. DLA PRZEDMIOTÓW (Klucze, Butelki, Bandaże do plecaka)
-	// --------------------------------------------------------------------
-	if (!CanBePocketed_Implementation())
-	{
-		if (GEngine)
-		{
-			GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow, TEXT("Nie mozesz tego podniesc! (Płonie lub jest niebezpieczne)"));
-		}
-		return;
-	}
-
-	UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>();
-	if (InvComp)
-	{
-		if (HealthComp)
-		{
-			ItemData.SavedHealth = HealthComp->CurrentHealth;
-		}
+		CaptureItemData();
 
 		if (InvComp->TryAddItem(ItemData))
 		{
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, FString::Printf(TEXT("Schowano do plecaka: %s (HP: %.1f)"), *ItemData.ItemTag.ToString(), ItemData.SavedHealth));
-			}
-
-			Destroy();
-		}
-		else
-		{
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red, TEXT("Brak miejsca w ekwipunku!"));
-			}
+			Destroy(); // Przechodzi ze świata 3D do bazy danych ekwipunku
 		}
 	}
 }
@@ -523,59 +607,37 @@ bool ABaseInteractable::ConsumeObject_Implementation(AActor* InstigatorActor)
 {
 	if (!InstigatorActor || !bCanBePocketed || !bCanBeConsumed) return false;
 
-	// OPTYMALIZACJA CPU:
 	static const FGameplayTag OilTag = FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Oil"), false);
 	static const FGameplayTag BandageTag = FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Bandage"), false);
 	static const FGameplayTag WineTag = FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Wine"), false);
 
-	// 1. NAFTA -> Uzupełnia Latarnię
-	if (ItemData.ItemTag.MatchesTag(FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Oil"), false)))
+	if (ItemData.ItemTag.MatchesTag(OilTag))
 	{
 		if (ULanternComponent* Lantern = InstigatorActor->FindComponentByClass<ULanternComponent>())
 		{
-			// ZABEZPIECZENIE: Jeśli brakuje mniej niż 1 jednostki paliwa -> BAK JEST PEŁNY!
-			if (Lantern->CurrentFuel >= (Lantern->MaxFuel))
-			{
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, TEXT("[LATARNIA] Bak jest pełny! Nie marnujesz nafty."));
-				}
-				return false; // NIE NISZCZYMY BUTELKI!
-			}
-
+			if (Lantern->CurrentFuel >= (Lantern->MaxFuel - 1.0f)) return false;
 			Lantern->RefillFuel(ItemData.PrimaryValue);
-
-			if (GEngine)
-			{
-				GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, 
-					FString::Printf(TEXT("[SZYBKIE UŻYCIE] Wlano +%.1f nafty!"), ItemData.PrimaryValue));
-			}
-
-			Destroy(); // Niszczymy butelkę TYLKO po faktycznym dolaniu
+			Destroy();
 			return true;
 		}
 	}
 
-	// 2. BANDAŻE -> Leczą Życie (HP)
 	if (ItemData.ItemTag.MatchesTag(BandageTag))
 	{
 		if (UHealthComponent* Health = InstigatorActor->FindComponentByClass<UHealthComponent>())
 		{
 			if (Health->CurrentHealth >= Health->GetMaxHealth()) return false;
-
 			Health->Heal(ItemData.PrimaryValue);
 			Destroy();
 			return true;
 		}
 	}
 
-	// 3. WINO MARIANI -> Przywraca Sanity
 	if (ItemData.ItemTag.MatchesTag(WineTag))
 	{
 		if (USanityComponent* Sanity = InstigatorActor->FindComponentByClass<USanityComponent>())
 		{
 			if (Sanity->CurrentSanity >= Sanity->GetMaxSanity()) return false;
-
 			Sanity->RestoreSanity(ItemData.PrimaryValue);
 			Destroy();
 			return true;
@@ -585,93 +647,266 @@ bool ABaseInteractable::ConsumeObject_Implementation(AActor* InstigatorActor)
 	return false;
 }
 
-// ====================================================================
-// IMPLEMENTACJA INTERFEJSU (IPhysicalInteract)
-// ====================================================================
-EInteractionType ABaseInteractable::GetInteractionType_Implementation()
+void ABaseInteractable::CaptureItemData()
 {
-	return InteractionType;
+	if (HealthComp)
+	{
+		ItemData.SavedHealth = HealthComp->CurrentHealth;
+		ItemData.bSavedCanBeDestroyed = HealthComp->bCanBeDestroyed;
+		ItemData.SavedDamageThreshold = HealthComp->DamageThreshold;
+		ItemData.SavedDamageSusceptibility = HealthComp->DamageSusceptibility;
+	}
+
+	if (UPrimitiveComponent* MeshComp = FindComponentByClass<UPrimitiveComponent>())
+	{
+		if (UStaticMeshComponent* StaticMesh = Cast<UStaticMeshComponent>(MeshComp))
+		{
+			ItemData.ItemMesh = StaticMesh->GetStaticMesh();
+		}
+		ItemData.MeshScale = MeshComp->GetComponentScale();
+	}
+
+	if (!ItemData.DropClass)
+	{
+		ItemData.DropClass = GetClass();
+	}
 }
 
-EMouseAxis ABaseInteractable::GetPreferredMouseAxis_Implementation()
+void ABaseInteractable::ApplyItemData(const FInventoryItemData& InData)
 {
-	return PreferredMouseAxis;
+	ItemData = InData;
+	bCanBePocketed = true;
+	bCanBeConsumed = true;
+
+	if (HealthComp)
+	{
+		if (InData.SavedHealth > 0.0f)
+		{
+			HealthComp->CurrentHealth = FMath::Min(InData.SavedHealth, HealthComp->GetMaxHealth());
+		}
+		else
+		{
+			HealthComp->CurrentHealth = HealthComp->GetMaxHealth();
+		}
+
+		HealthComp->bCanBeDestroyed = InData.bSavedCanBeDestroyed;
+		HealthComp->DamageThreshold = InData.SavedDamageThreshold;
+		HealthComp->DamageSusceptibility = InData.SavedDamageSusceptibility;
+	}
+
+	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetRootComponent());
+	if (!Prim)
+	{
+		Prim = FindComponentByClass<UPrimitiveComponent>();
+	}
+
+	if (Prim)
+	{
+		Prim->SetWorldScale3D(InData.MeshScale);
+		Prim->SetSimulatePhysics(true);
+		Prim->SetUseCCD(true);
+		Prim->BodyInstance.bUseCCD = true;
+	}
 }
+
+EInteractionType ABaseInteractable::GetInteractionType_Implementation() { return InteractionType; }
+EMouseAxis ABaseInteractable::GetPreferredMouseAxis_Implementation() { return PreferredMouseAxis; }
 
 void ABaseInteractable::GrabObject_Implementation(AActor* Grabber)
 {
+	static const FGameplayTag HeavyPropTag = FGameplayTag::RequestGameplayTag(FName("Prop.Size.Heavy"), false);
+	static const FGameplayTag HeavyLifterPerkTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.HeavyLifter"), false);
+
+	if (PropSizeTag.MatchesTag(HeavyPropTag))
+	{
+		if (UProgressionComponent* ProgComp = Grabber->FindComponentByClass<UProgressionComponent>())
+		{
+			if (!ProgComp->HasPerk(HeavyLifterPerkTag))
+			{
+#if !UE_BUILD_SHIPPING
+				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("[WIGOR] Zbyt ciężkie! Wymaga zdolności: Dźwigar (Wigor 1A)"));
+#endif
+				bIsHeld = false;
+				return;
+			}
+		}
+		else
+		{
+			// Jeśli chwytający nie ma w ogóle systemu progresji (np. skryptowa pułapka) - traktujemy jako słabego:
+			bIsHeld = false;
+			return;
+		}
+
+		if (UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(GetRootComponent()))
+		{
+			RootPrim->SetSimulatePhysics(true);
+			RootPrim->WakeRigidBody();
+		}
+	}
+
 	bIsHeld = true;
 }
 
-void ABaseInteractable::ReleaseObject_Implementation()
+void ABaseInteractable::ReleaseObject_Implementation() { bIsHeld = false; }
+void ABaseInteractable::MoveObject_Implementation(float AxisDelta) {}
+bool ABaseInteractable::IsLocked_Implementation()
 {
-	bIsHeld = false;
+	if (GateComp)
+	{
+		return GateComp->bIsLocked;
+	}
+	return false;
 }
+void ABaseInteractable::SetLocked_Implementation(bool bNewLocked)
+{
+	if (GateComp)
+	{
+		GateComp->bIsLocked = bNewLocked;
+	}
+}
+bool ABaseInteractable::IsLatched_Implementation() { return bIsLatched; }
+FGameplayTag ABaseInteractable::GetPropSizeTag_Implementation() { return PropSizeTag; }
 
 void ABaseInteractable::SlamObject_Implementation(FVector PushDirection, float PushForce)
 {
 	bIsHeld = false;
 
-	// Jeśli rzucamy granat z zapalnikiem czasowym -> start zegara eksplozji!
-	if (bIsStateEmitter && TriggerType == EEmissionTrigger::TimedFuse)
+	if (ItemData.bIsStateEmitter && ItemData.TriggerType == EEmissionTrigger::TimedFuse)
 	{
-		GetWorld()->GetTimerManager().SetTimer(FuseTimerHandle, this, &ABaseInteractable::TriggerStateEmission, FuseTime, false);
+		GetWorld()->GetTimerManager().SetTimer(FuseTimerHandle, this, &ABaseInteractable::TriggerStateEmission, ItemData.FuseTime, false);
 	}
-}
-
-void ABaseInteractable::MoveObject_Implementation(float AxisDelta)
-{
-}
-
-bool ABaseInteractable::IsLocked_Implementation()
-{
-	return bIsLocked;
-}
-
-void ABaseInteractable::SetLocked_Implementation(bool bNewLocked)
-{
-	bIsLocked = bNewLocked;
 }
 
 void ABaseInteractable::OnLockedInteraction_Implementation(AActor* InstigatorActor)
 {
-	if (!bIsLocked) return;
-
-	// 1. MECHANIKA PAMIĘCI: Sprawdzamy plecak TYLKO jeśli zamek został już wcześniej ODKRYTY Z RĘKI!
-	if (bKeyDiscovered && InstigatorActor)
+	// TA FUNKCJA JEST WYWOŁYWANA PRZEZ [LPM].
+	// W Twoim Blueprincie (BP_BaseDoor) odpali się zdarzenie "Event OnLockedInteraction",
+	// które odtworzy Twój efekt wibracji klamki i dźwięk!
+#if !UE_BUILD_SHIPPING
+	if (GEngine)
 	{
-		if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
-		{
-			// Automatycznie otwieramy zapamiętanym kluczem z plecaka:
-			if (InvComp->HasItemWithTag(RequiredKeyTag))
-			{
-				bIsLocked = false; // ZAMEK PUSZCZA!
+		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow, TEXT("🔒 [KLAMKA] Szarpnięcie zablokowanej klamki! Użyj [E] aby dopasować klucz."));
+	}
+#endif
+}
 
-				if (GEngine)
-				{
-					GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Green, TEXT("[ZAMEK] Odryglowano automatycznie zapamietanym kluczem z plecaka!"));
-				}
-				return;
+void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActor)
+{
+	ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(InstigatorActor);
+	if (!Player || !GateComp) return;
+
+	// 1. Zczytujemy tag z lewej ręki LPM lub prawej dłoni FPP:
+	FGameplayTag KeyTagFromHand = FGameplayTag::EmptyTag;
+	ABaseInteractable* PhysicalKeyInHand = nullptr;
+
+	if (Player->InteractionComp)
+	{
+		if (AActor* HeldActor = Player->InteractionComp->GetGrabbedActor())
+		{
+			if (ABaseInteractable* HeldProp = Cast<ABaseInteractable>(HeldActor))
+			{
+				KeyTagFromHand = HeldProp->ItemData.ItemTag;
+				PhysicalKeyInHand = HeldProp;
 			}
 		}
 	}
 
-	// 2. Jeśli zamek jest NIEODKRYTY (nawet jeśli masz klucz w plecaku, musisz go najpierw wyciągnąć do ręki!):
-	if (GEngine)
+	if (!KeyTagFromHand.IsValid() && Player->ToolManagerComp && Player->ToolManagerComp->CurrentEquippedTool)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, TEXT("[ZAMEK] Zamek jest zaryglowany. Musisz wyciagnac i recznie dopasowac klucz z dloni!"));
+		KeyTagFromHand = Player->ToolManagerComp->CurrentEquippedTool->ToolItemData.ItemTag;
 	}
-}
 
+	// ====================================================================
+	// SCENARIUSZ 1: DRZWI SĄ ZAMKNIĘTE -> PRÓBA OTWARCIA [E]:
+	// ====================================================================
+	if (GateComp->bIsLocked)
+	{
+		if (GateComp->TryUnlock(Player, KeyTagFromHand))
+		{
+			bIsLatched = false;
 
-bool ABaseInteractable::IsLatched_Implementation()
-{
-	return bIsLatched;
-}
+			// Jeśli użyliśmy fizycznego klucza z lewej ręki -> Chowamy go do plecaka!
+			if (PhysicalKeyInHand)
+			{
+				PhysicalKeyInHand->CaptureItemData();
+				if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
+				{
+					InvComp->TryAddItem(PhysicalKeyInHand->ItemData);
+				}
+				Player->InteractionComp->StopInteraction();
+				PhysicalKeyInHand->Destroy();
+			}
 
-FGameplayTag ABaseInteractable::GetPropSizeTag_Implementation()
-{
-	return PropSizeTag;
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Green, TEXT("🔓 [SUKCES] Zamek otwarty!"));
+#endif
+			return;
+		}
+		else
+		{
+			// Odmowa dostępu na [E] -> Odpala też efekt Rattle w BP jako informację!
+			IPhysicalInteract::Execute_OnLockedInteraction(this, InstigatorActor);
+			return;
+		}
+	}
+
+	// ====================================================================
+	// SCENARIUSZ 2: DRZWI SĄ ODBLOKOWANE -> PRÓBA ZARYGLOWANIA [E]:
+	// ====================================================================
+	if (!GateComp->bIsLocked)
+	{
+		bool bRequiresClosedPosition = (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation);
+
+		if (bRequiresClosedPosition && !bIsLatched)
+		{
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("⚠️ [ZAMEK] Musisz najpierw domknąć drzwi [LPM], by je zaryglować [E]!"));
+#endif
+			return;
+		}
+
+		// 1. Zaryglowanie pasującym kluczem z ręki (Dopasowanie + Schowanie):
+		if (GateComp->RequiredKeyTag.IsValid() && KeyTagFromHand.MatchesTagExact(GateComp->RequiredKeyTag))
+		{
+			GateComp->bIsLocked = true;
+			GateComp->bKeyDiscovered = true;
+			bIsLatched = true;
+
+			if (PhysicalKeyInHand)
+			{
+				PhysicalKeyInHand->CaptureItemData();
+				if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
+				{
+					InvComp->TryAddItem(PhysicalKeyInHand->ItemData);
+				}
+				Player->InteractionComp->StopInteraction();
+				PhysicalKeyInHand->Destroy();
+			}
+
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Cyan, TEXT("🔒 [ZARYGLOWANO] Dopasowano i zaryglowano zamek kluczem z dłoni!"));
+#endif
+			return;
+		}
+
+		// 2. Zaryglowanie kluczem z plecaka (Dla już ODKRYTYCH zamków):
+		if (GateComp->bKeyDiscovered && GateComp->RequiredKeyTag.IsValid())
+		{
+			if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
+			{
+				if (InvComp->HasItemWithTag(GateComp->RequiredKeyTag))
+				{
+					GateComp->bIsLocked = true;
+					bIsLatched = true;
+
+#if !UE_BUILD_SHIPPING
+					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Cyan, TEXT("🔒 [ZARYGLOWANO] Zaryglowano zamek kluczem z plecaka!"));
+#endif
+					return;
+				}
+			}
+		}
+	}
 }
 
 bool ABaseInteractable::IsSmallProp_Implementation()
