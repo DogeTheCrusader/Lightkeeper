@@ -25,6 +25,9 @@ public:
 	float Stamina = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Stamina")
+	float JumpStaminaCost = 18.0f; // Koszt staminy za pojedynczy skok
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Stamina")
 	float MaxStamina = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Stamina")
@@ -111,6 +114,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Stamina")
 	float GetEncumbranceSpeedMultiplier() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Stamina")
+	bool TryConsumeJumpStamina();
 
 protected:
 	virtual void BeginPlay() override;

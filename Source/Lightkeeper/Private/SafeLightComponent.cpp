@@ -5,6 +5,8 @@
 #include "Components/PointLightComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Components/LightComponent.h"
+#include "Engine/World.h"
 #include "BaseInteractable.h"
 
 USafeLightComponent::USafeLightComponent()
@@ -204,15 +206,39 @@ void USafeLightComponent::UpdatePlayerLightState()
 	}
 }
 
+void USafeLightComponent::SetDynamicRadius(float NewRadius)
+{
+	SetSphereRadius(NewRadius, true);
+}
+
 void USafeLightComponent::SetLightActive(bool bNewActive)
 {
 	if (bIsLightActive == bNewActive) return;
 
 	bIsLightActive = bNewActive;
 	UpdatePlayerLightState();
-}
 
-void USafeLightComponent::SetDynamicRadius(float NewRadius)
-{
-	SetSphereRadius(NewRadius, true);
+	// ====================================================================
+	// AUTOMATYCZNIE GASIMY / ZAPALAMY WSZYSTKIE ŻARÓWKI (PointLight / SpotLight):
+	// ====================================================================
+	if (AActor* Owner = GetOwner())
+	{
+		TArray<ULightComponent*> VisualLights;
+		Owner->GetComponents<ULightComponent>(VisualLights);
+		for (ULightComponent* Light : VisualLights)
+		{
+			if (Light)
+			{
+				Light->SetVisibility(bIsLightActive);
+			}
+		}
+	}
+
+#if !UE_BUILD_SHIPPING
+	if (GEngine)
+	{
+		FString StateStr = bIsLightActive ? TEXT("💡 [ŚWIATŁO WŁĄCZONE]") : TEXT("🌑 [ŚWIATŁO ZGASZONE]");
+		GEngine->AddOnScreenDebugMessage((uint64)GetUniqueID() + 400, 2.0f, bIsLightActive ? FColor::Yellow : FColor::Silver, StateStr);
+	}
+#endif
 }

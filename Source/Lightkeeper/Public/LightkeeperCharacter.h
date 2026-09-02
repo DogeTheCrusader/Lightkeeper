@@ -141,6 +141,8 @@ public:
 	void Debug_TestLegs(); void Debug_TestRightArm(); void Debug_TestChest(); void Debug_TestSprain();
 
 protected:
+	float LandingRecoveryTimer = 0.0f;
 	virtual void BeginPlay() override;
+	virtual void Jump() override;
 	virtual void Landed(const FHitResult& Hit) override;
 };

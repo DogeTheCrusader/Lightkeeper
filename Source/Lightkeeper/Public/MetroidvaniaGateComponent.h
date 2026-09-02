@@ -3,9 +3,14 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "GameplayTagContainer.h"
-#include "MetroidvaniaGateComponent.generated.h" // To ZAWSZE musi być ostatni include w pliku .h!
+#include "MetroidvaniaGateComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGateUnlocked, FName, UnlockMethod);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnGateStateChanged, bool, bIsLocked);
+
+class ALightkeeperCharacter;
+class UHealthComponent;
+class UReactionReceiverComponent;
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class LIGHTKEEPER_API UMetroidvaniaGateComponent : public UActorComponent
@@ -15,33 +20,65 @@ class LIGHTKEEPER_API UMetroidvaniaGateComponent : public UActorComponent
 public:
 	UMetroidvaniaGateComponent();
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gate|State")
+	// Stan blokady:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate")
 	bool bIsLocked = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gate|Requirements")
-	FGameplayTag RequiredKeyTag;
-
-	// Pamięć zamka (czy gracz zdążył już raz dopasować do niego klucz?):
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gate|State")
+	// Czy zamek został już kiedyś odkryty (do szybkiego ryglowania z plecaka):
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Gate")
 	bool bKeyDiscovered = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gate|Requirements")
+	// Wymagany klucz (np. Item.Key.Brass):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate|Requirements")
+	FGameplayTag RequiredKeyTag;
+
+	// Wymagany Perk do cichego otwarcia (np. Perk.Precision.2A):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate|Requirements")
 	FGameplayTag RequiredPerkTag;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gate|ImSim Bypass")
-	bool bCanBeMeltedByAcid = false;
+	// Czy zamek można stopić kwasem:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate|Bypass")
+	bool bCanBeMeltedByAcid = true;
 
-	UPROPERTY(BlueprintAssignable, Category = "Gate|Events")
+	// Czy zamek można wyważyć siłą fizyczną (Młot / Łom / Taran):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate|Bypass")
+	bool bCanBeForcedByDamage = true;
+
+	// Delegaty:
+	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Gate")
 	FOnGateUnlocked OnGateUnlocked;
 
-	UFUNCTION(BlueprintCallable, Category = "Gate")
-	bool TryUnlock(class ALightkeeperCharacter* Instigator, FGameplayTag ToolOrKeyTag);
+	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Gate")
+	FOnGateStateChanged OnGateStateChanged;
 
-	UFUNCTION(BlueprintCallable, Category = "Gate")
+	// Główna funkcja otwierania:
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Gate")
+	bool TryUnlock(AActor* Instigator, FGameplayTag ToolOrKeyTag);
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Gate")
 	void UnlockGate(FName MethodName);
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Gate")
+	void SetGateLocked(bool bNewLocked);
+
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Lightkeeper|Gate", meta = (ToolTip = "Wskaż pipetą drzwi lub mebel, który ta kłódka ma trzymać zablokowany."))
+	TObjectPtr<AActor> TargetObjectToLock;
+
+	// Czy po otwarciu kłódka ma z brzękiem odpaść i spaść na podłogę (fizyka):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate")
+	bool bDropWithPhysicsOnUnlock = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Gate")
+	bool bCanBeRelocked = false;
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Gate")
+	void ToggleGate();
 
 protected:
 	virtual void BeginPlay() override;
+
+	UFUNCTION()
+	void HandleOwnerDeath();
 
 	UFUNCTION()
 	void HandleChemicalReaction(FGameplayTag StateTag, float Intensity);

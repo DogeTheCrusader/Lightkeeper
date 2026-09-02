@@ -15,6 +15,14 @@ enum class EToolState : uint8
 	Action			UMETA(DisplayName = "W Trakcie Akcji (Cooldown)")
 };
 
+UENUM(BlueprintType)
+enum class EAttackMode : uint8
+{
+	Light           UMETA(DisplayName = "Light Attack (Tap LPM)"),
+	Heavy           UMETA(DisplayName = "Heavy Attack (Hold LPM)"),
+	QuickMelee      UMETA(DisplayName = "Quick Melee (Key V / Bash)")
+};
+
 UCLASS(Blueprintable)
 class LIGHTKEEPER_API ABaseTool : public AActor
 {
@@ -47,7 +55,7 @@ public:
 	FInventoryItemData ToolItemData;
 
 	// ====================================================================
-	// 3. ZMIENNE KOMPATYBILNOŚCI (Dla ToolManager i InventoryComponent)
+	// 3. ZMIENNE KOMPATYBILNOŚCI
 	// ====================================================================
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Tool Runtime")
 	FGameplayTag ToolTag;
@@ -62,7 +70,7 @@ public:
 	TSubclassOf<class ABaseInteractable> DropClass;
 
 	// ====================================================================
-	// 4. STAN I AMUNICJA W LOCIE
+	// 4. STAN I AMUNICJA
 	// ====================================================================
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Tool State")
 	EToolState CurrentState = EToolState::LowReady;
@@ -98,7 +106,15 @@ protected:
 	virtual void PerformLightAttack();
 	virtual void PerformHeavyAttack();
 	virtual void PerformThrowAction(float ChargeMultiplier = 1.0f);
-	virtual void PerformUniversalAttackTrace(bool bIsHeavy);
+
+	// Główny silnik walki wręcz:
+	virtual void PerformUniversalAttackTrace(EAttackMode AttackMode);
+
+	// Wrapper zachowujący kompatybilność:
+	void PerformUniversalAttackTrace(bool bIsHeavy)
+	{
+		PerformUniversalAttackTrace(bIsHeavy ? EAttackMode::Heavy : EAttackMode::Light);
+	}
 
 	virtual void ApplyMeleeHit(AActor* TargetActor, float PhysicalDamage, FGameplayTag PhysicalDamageTag, FGameplayTag StateTag, float Intensity);
 	virtual bool TryConsumeResources(bool bIsHeavy);

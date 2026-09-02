@@ -9,6 +9,8 @@
 #include "ToolManagerComponent.h"
 #include "InteractionComponent.h"
 #include "StatusEffectComponent.h"
+#include "ProgressionComponent.h"
+#include "ImSimSensorySubsystem.h"
 #include "TimerManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -101,15 +103,30 @@ void ABaseTool::StartPrimaryAction()
 
 	if (ToolItemData.EquipType != EItemEquipType::Throwable)
 	{
-		if (UWorld* World = GetWorld())
+		// ====================================================================
+		// WYMÓG WIGORU 1A: Tylko postać z Wigorem potrafi ładować potężny cios!
+		// ====================================================================
+		bool bCanChargeHeavyAttack = false;
+		if (AActor* MyOwner = GetOwner())
 		{
-			World->GetTimerManager().SetTimer(
-				HeavyChargeTimerHandle,
-				this,
-				&ABaseTool::TriggerAutomaticHeavyAttack,
-				0.35f,
-				false
-			);
+			if (UProgressionComponent* ProgComp = MyOwner->FindComponentByClass<UProgressionComponent>())
+			{
+				bCanChargeHeavyAttack = ProgComp->CanPerformHeavyMelee(); // ODPYTUJEMY BRAMKĘ ZDOLNOŚCI!
+			}
+		}
+
+		if (bCanChargeHeavyAttack)
+		{
+			if (UWorld* World = GetWorld())
+			{
+				World->GetTimerManager().SetTimer(
+					HeavyChargeTimerHandle,
+					this,
+					&ABaseTool::TriggerAutomaticHeavyAttack,
+					0.35f,
+					false
+				);
+			}
 		}
 	}
 }
@@ -139,15 +156,29 @@ void ABaseTool::StopPrimaryAction()
 	float HoldDuration = GetWorld()->GetTimeSeconds() - PrimaryActionStartTime;
 	PrimaryActionStartTime = 0.0f;
 
+	// 1. DLA BRONI MIOTANEJ (GRANATY / MOŁOTOWY):
 	if (ToolItemData.EquipType == EItemEquipType::Throwable)
 	{
 		float ChargeMultiplier = 1.0f;
 		if (AActor* MyOwner = GetOwner())
 		{
-			if (UInteractionComponent* InterComp = MyOwner->FindComponentByClass<UInteractionComponent>())
+			// ====================================================================
+			// WYMÓG WIGORU TIER 1 DLA ŁADOWANEGO RZUTU GRANATEM:
+			// ====================================================================
+			bool bCanChargeThrow = false;
+			if (UProgressionComponent* ProgComp = MyOwner->FindComponentByClass<UProgressionComponent>())
 			{
-				float ChargeAlpha = FMath::Clamp(HoldDuration / FMath::Max(0.1f, InterComp->MaxChargeTime), 0.0f, 1.0f);
-				ChargeMultiplier = FMath::Lerp(1.0f, InterComp->MaxChargedThrowMultiplier, ChargeAlpha);
+				bCanChargeThrow = ProgComp->CanPerformHeavyMelee();
+			}
+
+			// Tylko z Wigorem 1A gracz może naładować siłę rzutu granatu:
+			if (bCanChargeThrow)
+			{
+				if (UInteractionComponent* InterComp = MyOwner->FindComponentByClass<UInteractionComponent>())
+				{
+					float ChargeAlpha = FMath::Clamp(HoldDuration / FMath::Max(0.1f, InterComp->MaxChargeTime), 0.0f, 1.0f);
+					ChargeMultiplier = FMath::Lerp(1.0f, InterComp->MaxChargedThrowMultiplier, ChargeAlpha);
+				}
 			}
 
 			if (ChargeMultiplier > 1.2f)
@@ -173,7 +204,20 @@ void ABaseTool::StopPrimaryAction()
 		return;
 	}
 
-	bool bIsHeavy = (HoldDuration >= 0.35f);
+	// ====================================================================
+	// 2. DLA BRONI BIAŁEJ (BLOKADA HEAVY ATTACK POD WIGOR TIER 1):
+	// ====================================================================
+	bool bCanUseHeavy = false;
+	if (AActor* MyOwner = GetOwner())
+	{
+		if (UProgressionComponent* ProgComp = MyOwner->FindComponentByClass<UProgressionComponent>())
+		{
+			bCanUseHeavy = ProgComp->CanPerformHeavyMelee(); // BRAMKA ZDOLNOŚCI!
+		}
+	}
+
+	// Atak Ciężki odpali się TYLKO jeśli trzymano LPM >= 0.35s ORAZ gracz ma Wigor Tier 1:
+	bool bIsHeavy = (HoldDuration >= 0.35f) && bCanUseHeavy;
 
 	if (!TryConsumeResources(bIsHeavy)) return;
 
@@ -193,24 +237,86 @@ void ABaseTool::StopPrimaryAction()
 
 void ABaseTool::PerformLightAttack()
 {
-	PerformUniversalAttackTrace(false);
+	PerformUniversalAttackTrace(EAttackMode::Light);
 }
 
 void ABaseTool::PerformHeavyAttack()
 {
-	PerformUniversalAttackTrace(true);
+	PerformUniversalAttackTrace(EAttackMode::Heavy);
 }
 
-void ABaseTool::PerformUniversalAttackTrace(bool bIsHeavy)
+void ABaseTool::QuickMelee()
+{
+	if (!bCanQuickMelee) return;
+
+	AActor* MyOwner = GetOwner();
+	if (!MyOwner) return;
+
+	// 1. Blokada w gardzie:
+	if (UStatusEffectComponent* StatusComp = MyOwner->FindComponentByClass<UStatusEffectComponent>())
+	{
+		static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
+		if (StatusComp->HasStatusEffect(GuardTag))
+		{
+			return; // Zablokowane w trakcie trzymania gardy!
+		}
+	}
+
+	// 2. Blokada przy zwichniętym barku (Major.LeftArm):
+	if (UHealthComponent* Health = MyOwner->FindComponentByClass<UHealthComponent>())
+	{
+		if (!Health->IsActionAllowed(EPlayerAction::QuickMelee))
+		{
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red, TEXT("❌ [URAZ] Zwichnięty bark uniemożliwia szybki cios kolbą [V]!"));
+#endif
+			return;
+		}
+	}
+
+	// 3. Pobranie kosztu staminy:
+	float StaminaCost = ToolItemData.StaminaCostPerAttack * 0.5f;
+	UStaminaComponent* Stamina = MyOwner->FindComponentByClass<UStaminaComponent>();
+	if (Stamina && !Stamina->TryConsumeStamina(StaminaCost)) return;
+
+	bCanQuickMelee = false;
+	ExecuteQuickMeleeEffect();
+
+	// ====================================================================
+	// WYZWOLENIE CENTRALNEGO SILNIKA WALKI WRĘCZ DLA QUICK MELEE [V]:
+	// ====================================================================
+	PerformUniversalAttackTrace(EAttackMode::QuickMelee);
+
+	float FinalCooldown = (ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 0.4f : ToolItemData.QuickMeleeCooldown;
+	if (FinalCooldown <= 0.0f) FinalCooldown = 0.5f;
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(QuickMeleeTimerHandle, this, &ABaseTool::ResetQuickMeleeCooldown, FinalCooldown, false);
+	}
+}
+
+void ABaseTool::PerformUniversalAttackTrace(EAttackMode AttackMode)
 {
 	APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	if (!CamMgr) return;
 
-	float CurrentRange = bIsHeavy ? ToolItemData.HeavyAttackRange : ToolItemData.AttackRange;
-	float CurrentDamage = bIsHeavy ? ToolItemData.HeavyAttackDamage : ToolItemData.BaseDamage;
-	float CurrentIntensity = bIsHeavy ? (ToolItemData.StateIntensity * 1.5f) : ToolItemData.StateIntensity;
+	bool bIsHeavy = (AttackMode == EAttackMode::Heavy);
+	bool bIsQuick = (AttackMode == EAttackMode::QuickMelee);
 
-	// Sprawdzamy czy gracz trzyma gardę (do pchnięcia obronnego):
+	float CurrentRange = bIsQuick ?
+		((ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 100.0f : ToolItemData.QuickMeleeRange) :
+		(bIsHeavy ? ToolItemData.HeavyAttackRange : ToolItemData.AttackRange);
+
+	float CurrentDamage = bIsQuick ?
+		((ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 15.0f : ToolItemData.QuickMeleeDamage) :
+		(bIsHeavy ? ToolItemData.HeavyAttackDamage : ToolItemData.BaseDamage);
+
+	float CurrentIntensity = bIsHeavy ? (ToolItemData.StateIntensity * 1.5f) : (bIsQuick ? 0.0f : ToolItemData.StateIntensity);
+	EToolTraceShape ActiveShape = bIsQuick ? EToolTraceShape::SphereSweep : ToolItemData.AttackShape;
+	bool bAllowStealthTakedown = !bIsQuick; // Quick Melee [V] NIGDY nie wykonuje Takedownu!
+
+	// 1. Sprawdzamy Gardę i Ból Kości:
 	bool bIsPlayerInGuard = false;
 
 	if (AActor* MyOwner = GetOwner())
@@ -225,21 +331,18 @@ void ABaseTool::PerformUniversalAttackTrace(bool bIsHeavy)
 		{
 			CurrentDamage *= Health->GetMeleeDamageMultiplier();
 
-			float Pain = Health->GetActionPainCost(EAnatomicalLimb::RightArm);
+			float Pain = Health->GetActionPainCost(bIsQuick ? EAnatomicalLimb::LeftArm : EAnatomicalLimb::RightArm);
 			if (Pain > 0.0f && !bIsPlayerInGuard)
 			{
 				static const FGameplayTag InternalPainTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
 				Health->TakeDamage(Pain, InternalPainTag);
-
-#if !UE_BUILD_SHIPPING
-				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red, TEXT("⚠️ [BÓL] Wyprowadzenie ciosu złamaną ręką zadało Ci rany!"));
-#endif
 			}
 		}
 	}
 
-	FVector Start = CamMgr->GetCameraLocation();
+	// 2. Precyzyjny punkt startowy 15 cm przed celownikiem:
 	FVector ForwardDir = CamMgr->GetCameraRotation().Vector();
+	FVector Start = CamMgr->GetCameraLocation() + (ForwardDir * 15.0f);
 	FVector End = Start + (ForwardDir * CurrentRange);
 	FRotator CameraRot = CamMgr->GetCameraRotation();
 
@@ -247,86 +350,87 @@ void ABaseTool::PerformUniversalAttackTrace(bool bIsHeavy)
 	Params.AddIgnoredActor(this);
 	Params.AddIgnoredActor(GetOwner());
 
-	FCollisionObjectQueryParams ObjectQueryParams;
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_PhysicsBody);
-	ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn); // Trafia w potwory!
+	static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
 
 	// ====================================================================
-	// 1. STOŻEK (Cone - Palnik Nyberga / Strzelba)
+	// 1. KSZTAŁT: STOŻEK (Cone - Palnik Nyberga / Garłacz)
 	// ====================================================================
-	if (ToolItemData.AttackShape == EToolTraceShape::Cone)
+	if (ActiveShape == EToolTraceShape::Cone)
 	{
 		float ActiveConeAngle = bIsHeavy ? (ToolItemData.AttackConeAngle * 1.3f) : ToolItemData.AttackConeAngle;
-
-		TArray<FOverlapResult> Overlaps;
+		TArray<FHitResult> Overlaps;
 		FCollisionShape Sphere = FCollisionShape::MakeSphere(CurrentRange);
 
-		if (GetWorld()->OverlapMultiByObjectType(Overlaps, Start, FQuat::Identity, ObjectQueryParams, Sphere, Params))
+		GetWorld()->SweepMultiByChannel(Overlaps, Start, End, FQuat::Identity, ECC_Visibility, Sphere, Params);
+
+		float ConeLimit = FMath::Cos(FMath::DegreesToRadians(ActiveConeAngle));
+		TSet<AActor*> ProcessedActors;
+
+		for (const FHitResult& HitOverlap : Overlaps)
 		{
-			float ConeLimit = FMath::Cos(FMath::DegreesToRadians(ActiveConeAngle));
-			TSet<AActor*> ProcessedActors;
-
-			for (const FOverlapResult& HitOverlap : Overlaps)
+			if (AActor* HitActor = HitOverlap.GetActor())
 			{
-				if (AActor* HitActor = HitOverlap.GetActor())
+				if (ProcessedActors.Contains(HitActor)) continue;
+				ProcessedActors.Add(HitActor);
+
+				FVector TargetCenter = HitActor->GetActorLocation() + FVector(0.0f, 0.0f, 45.0f);
+				FVector DirToTarget = (TargetCenter - Start).GetSafeNormal();
+				float Dot = FVector::DotProduct(ForwardDir, DirToTarget);
+
+				if (Dot >= ConeLimit)
 				{
-					if (ProcessedActors.Contains(HitActor)) continue;
-					ProcessedActors.Add(HitActor);
-
-					FVector DirToTarget = (HitActor->GetActorLocation() - Start).GetSafeNormal();
-					float Dot = FVector::DotProduct(ForwardDir, DirToTarget);
-
-					if (Dot >= ConeLimit)
+					if (bIsPlayerInGuard)
 					{
-						if (bIsPlayerInGuard)
+						if (ACharacter* TargetChar = Cast<ACharacter>(HitActor))
 						{
-							if (ACharacter* TargetChar = Cast<ACharacter>(HitActor))
-							{
-								FVector LaunchDir = ForwardDir + FVector(0.0f, 0.0f, 0.20f);
-								TargetChar->LaunchCharacter(LaunchDir * (bIsHeavy ? 900.0f : 550.0f), true, true);
-							}
+							FVector LaunchDir = ForwardDir + FVector(0.0f, 0.0f, 0.20f);
+							TargetChar->LaunchCharacter(LaunchDir * (bIsHeavy ? 900.0f : 550.0f), true, true);
 						}
-						else
-						{
-							ApplyMeleeHit(HitActor, CurrentDamage, ToolItemData.PhysicalDamageTag, ToolItemData.AttackStateTag, CurrentIntensity);
-						}
+					}
+					else
+					{
+						ApplyMeleeHit(HitActor, CurrentDamage, ToolItemData.PhysicalDamageTag, ToolItemData.AttackStateTag, CurrentIntensity);
 					}
 				}
 			}
 		}
 
 #if !UE_BUILD_SHIPPING
-		// DIAGNOSTYKA WIZUALNA STOŻKA:
-		DrawDebugCone(GetWorld(), Start, ForwardDir, CurrentRange, FMath::DegreesToRadians(ActiveConeAngle), FMath::DegreesToRadians(ActiveConeAngle), 16, bIsHeavy ? FColor::Purple : FColor::Orange, false, 1.5f);
+		DrawDebugCone(GetWorld(), Start, ForwardDir, CurrentRange, FMath::DegreesToRadians(ActiveConeAngle), FMath::DegreesToRadians(ActiveConeAngle), 16, bIsHeavy ? FColor::Purple : FColor::Orange, false, 0.8f);
 #endif
 		return;
 	}
 
 	// ====================================================================
-	// 2. POZOSTAŁE KSZTAŁTY (Linia, Pudełko, Kula):
+	// 2. POZOSTAŁE KSZTAŁTY (Linia, Pudełko, Kula)
 	// ====================================================================
 	FHitResult Hit;
 	bool bHit = false;
 
-	switch (ToolItemData.AttackShape)
+	switch (ActiveShape)
 	{
 	case EToolTraceShape::LineTrace:
-		bHit = GetWorld()->LineTraceSingleByObjectType(Hit, Start, End, ObjectQueryParams, Params);
+	{
+		bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+		if (!bHit) bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Pawn, Params);
+
 #if !UE_BUILD_SHIPPING
-		// DIAGNOSTYKA WIZUALNA LINII:
-		DrawDebugLine(GetWorld(), Start, bHit ? Hit.ImpactPoint : End, bHit ? FColor::Green : FColor::Red, false, 1.5f, 0, 2.0f);
+		DrawDebugLine(GetWorld(), Start, bHit ? Hit.ImpactPoint : End, bHit ? FColor::Green : FColor::Red, false, 0.8f, 0, 2.0f);
 #endif
-		break;
+	}
+	break;
 
 	case EToolTraceShape::BoxSweep:
 	{
 		FVector ActiveBoxExtents = bIsHeavy ? (ToolItemData.BoxTraceHalfExtents * 1.5f) : ToolItemData.BoxTraceHalfExtents;
-		bHit = GetWorld()->SweepSingleByObjectType(Hit, Start, End, CameraRot.Quaternion(), ObjectQueryParams, FCollisionShape::MakeBox(ActiveBoxExtents), Params);
+		FCollisionShape BoxShape = FCollisionShape::MakeBox(ActiveBoxExtents);
+
+		bHit = GetWorld()->SweepSingleByChannel(Hit, Start, End, CameraRot.Quaternion(), ECC_Visibility, BoxShape, Params);
+		if (!bHit) bHit = GetWorld()->SweepSingleByChannel(Hit, Start, End, CameraRot.Quaternion(), ECC_Pawn, BoxShape, Params);
+
 #if !UE_BUILD_SHIPPING
-		// DIAGNOSTYKA WIZUALNA PUDEŁKA:
-		DrawDebugBox(GetWorld(), bHit ? Hit.ImpactPoint : End, ActiveBoxExtents, CameraRot.Quaternion(), bHit ? FColor::Green : FColor::Red, false, 1.5f);
+		FColor BoxColor = bHit ? FColor::Green : FColor::Red;
+		DrawDebugBox(GetWorld(), bHit ? Hit.ImpactPoint : ((Start + End) * 0.5f), ActiveBoxExtents, CameraRot.Quaternion(), BoxColor, false, 0.8f);
 #endif
 	}
 	break;
@@ -334,155 +438,121 @@ void ABaseTool::PerformUniversalAttackTrace(bool bIsHeavy)
 	case EToolTraceShape::SphereSweep:
 	default:
 	{
-		float ActiveRadius = bIsHeavy ? ToolItemData.HeavyAttackRadius : ToolItemData.AttackRadius;
-		bHit = GetWorld()->SweepSingleByObjectType(Hit, Start, End, FQuat::Identity, ObjectQueryParams, FCollisionShape::MakeSphere(ActiveRadius), Params);
+		float ActiveRadius = bIsQuick ? 25.0f : (bIsHeavy ? ToolItemData.HeavyAttackRadius : ToolItemData.AttackRadius);
+		FCollisionShape SphereShape = FCollisionShape::MakeSphere(ActiveRadius);
+
+		bHit = GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, SphereShape, Params);
+		if (!bHit) bHit = GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Pawn, SphereShape, Params);
+
 #if !UE_BUILD_SHIPPING
-		// DIAGNOSTYKA WIZUALNA KULI:
-		DrawDebugSphere(GetWorld(), bHit ? Hit.ImpactPoint : End, ActiveRadius, 12, bHit ? (bIsHeavy ? FColor::Purple : FColor::Green) : FColor::Red, false, 1.5f);
+		FColor SphereColor = bHit ? (bIsQuick ? FColor::Cyan : (bIsHeavy ? FColor::Purple : FColor::Green)) : FColor::Red;
+		DrawDebugCapsule(GetWorld(), (Start + End) * 0.5f, CurrentRange * 0.5f, ActiveRadius, FRotationMatrix::MakeFromZ(ForwardDir).ToQuat(), SphereColor, false, 0.8f, 0, 1.2f);
 #endif
 	}
 	break;
 	}
 
 	// ====================================================================
-	// 3. FIZYKA UDERZENIA I TAKEDOWN
+	// 3. FIZYKA UDERZENIA, ODPYCHANIE W GARDZIE I STEALTH TAKEDOWN
 	// ====================================================================
 	if (bHit && Hit.GetActor())
 	{
 		AActor* TargetActor = Hit.GetActor();
+		UPrimitiveComponent* HitComponent = Hit.GetComponent();
 
-		// A. ODPYCHANIE W GARDZIE (SHIELD BASH)
+		// ------------------------------------------------------------
+		// MIEJSCE 1: HAŁAS FIZYCZNEGO UDERZENIA W CEL (Skalowany materiałem):
+		// ------------------------------------------------------------
+		if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+		{
+			FGameplayTag HitMaterialTag = UImSimSensorySubsystem::ExtractMaterialTagFromActor(TargetActor);
+
+			float TargetMass = 20.0f;
+			if (HitComponent && HitComponent->IsSimulatingPhysics())
+			{
+				TargetMass = HitComponent->GetMass();
+			}
+
+			float ToolMaterialMod = (bIsQuick || ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 0.5f : 1.3f;
+			float MassFactor = FMath::Clamp(FMath::Sqrt(FMath::Max(1.0f, TargetMass) / 15.0f), 0.6f, 2.2f);
+			float RawHitRadius = (CurrentDamage * 7.5f) * MassFactor * ToolMaterialMod;
+			float FinalHitRadius = FMath::Clamp(RawHitRadius, 80.0f, 1800.0f);
+
+			FVector SoundLocation = Hit.ImpactPoint.IsNearlyZero() ? End : FVector(Hit.ImpactPoint);
+
+			// Subsystem sam przeliczy mnożnik materiału:
+			Sensory->RegisterNoise(SoundLocation, FinalHitRadius, NoiseTag, HitMaterialTag);
+		}
+
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
+		{
+			FString AttackTypeStr = bIsQuick ? TEXT("[QUICK MELEE V]") : (bIsHeavy ? TEXT("[HEAVY ATTACK]") : TEXT("[LIGHT ATTACK]"));
+			FString CompName = HitComponent ? HitComponent->GetName() : TEXT("BrakKomponentu");
+			GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan,
+				FString::Printf(TEXT("🎯 %s Trafiono: %s -> %s (Dystans: %.0f cm)"),
+					*AttackTypeStr, *TargetActor->GetName(), *CompName, Hit.Distance));
+		}
+#endif
+
+		// A. ODPYCHANIE W GARDZIE (SHIELD BASH):
 		if (bIsPlayerInGuard)
 		{
 			if (ACharacter* TargetChar = Cast<ACharacter>(TargetActor))
 			{
 				FVector LaunchDirection = ForwardDir + FVector(0.0f, 0.0f, 0.25f);
 				float LaunchStrength = bIsHeavy ? 1100.0f : 550.0f;
-
 				TargetChar->LaunchCharacter(LaunchDirection * LaunchStrength, true, true);
 
-#if !UE_BUILD_SHIPPING
-				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
-					FString::Printf(TEXT("🛡️ [ODEPCHNIĘCIE] %s! Siła: %.0f"), bIsHeavy ? TEXT("POTĘŻNY TARAN") : TEXT("Szybki wstrząs"), LaunchStrength));
-#endif
-			}
-			else if (UPrimitiveComponent* TargetPrim = Cast<UPrimitiveComponent>(Hit.GetComponent()))
-			{
-				if (TargetPrim->IsSimulatingPhysics())
+				if (UStatusEffectComponent* TargetStatus = TargetChar->FindComponentByClass<UStatusEffectComponent>())
 				{
-					float PushImpulse = bIsHeavy ? 1200.0f : 600.0f;
-					TargetPrim->AddImpulse(ForwardDir * PushImpulse, NAME_None, true);
+					TargetStatus->ApplyStun(bIsHeavy ? 1.5f : 0.7f);
 				}
 			}
+			else if (HitComponent && HitComponent->IsSimulatingPhysics())
+			{
+				float PushImpulse = bIsHeavy ? 1200.0f : 600.0f;
+				HitComponent->AddImpulse(ForwardDir * PushImpulse, NAME_None, true);
+			}
 		}
-		// B. ATAK Z ZASKOCZENIA LUB ZWYKŁY CIOS BRONIĄ:
+		// B. STEALTH TAKEDOWN (TYLKO DLA POTWORÓW APawn!) LUB ZWYKŁY CIOS:
 		else
 		{
 			bool bIsBackstab = false;
-			FVector TargetForward = TargetActor->GetActorForwardVector();
-			FVector DirFromTargetToPlayer = (GetOwner()->GetActorLocation() - TargetActor->GetActorLocation()).GetSafeNormal();
 
-			if (FVector::DotProduct(TargetForward, DirFromTargetToPlayer) < -0.5f)
+			if (bAllowStealthTakedown && TargetActor->IsA<APawn>())
 			{
-				bIsBackstab = true;
+				FVector TargetForward = TargetActor->GetActorForwardVector();
+				FVector DirFromTargetToPlayer = (GetOwner()->GetActorLocation() - TargetActor->GetActorLocation()).GetSafeNormal();
+
+				if (FVector::DotProduct(TargetForward, DirFromTargetToPlayer) < -0.5f)
+				{
+					bIsBackstab = true;
+				}
 			}
 
-			FGameplayTag FinalTag = ToolItemData.PhysicalDamageTag;
+			FGameplayTag FinalDamageTag = bIsQuick ? FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false) : ToolItemData.PhysicalDamageTag;
 			if (bIsBackstab)
 			{
-				FinalTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.StealthTakedown"), false);
+				FinalDamageTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.StealthTakedown"), false);
 			}
 
-			ApplyMeleeHit(TargetActor, CurrentDamage, FinalTag, ToolItemData.AttackStateTag, CurrentIntensity);
+			FGameplayTag FinalStateTag = bIsQuick ? FGameplayTag::EmptyTag : ToolItemData.AttackStateTag;
+			float FinalIntensity = bIsQuick ? 0.0f : CurrentIntensity;
+
+			ApplyMeleeHit(TargetActor, CurrentDamage, FinalDamageTag, FinalStateTag, FinalIntensity);
 		}
 	}
-}
-
-void ABaseTool::QuickMelee()
-{
-	if (!bCanQuickMelee) return;
-
-	AActor* MyOwner = GetOwner();
-	if (!MyOwner) return;
-
 	// ====================================================================
-	// BLOKADA QUICK MELEE W GARDZIE:
+	// MIEJSCE 2: PUDŁO W POWIETRZE (Świst zamachu / Whoosh dla stojących obok):
 	// ====================================================================
-	if (UStatusEffectComponent* StatusComp = MyOwner->FindComponentByClass<UStatusEffectComponent>())
+	else
 	{
-		static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
-		if (StatusComp->HasStatusEffect(GuardTag))
+		if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 		{
-			return; // Zablokowane w gardzie!
+			float WhooshNoiseRadius = bIsHeavy ? 180.0f : (bIsQuick ? 60.0f : 120.0f);
+			Sensory->RegisterNoise(Start, WhooshNoiseRadius, NoiseTag);
 		}
-	}
-
-	float FinalDamage = (ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 15.0f : ToolItemData.QuickMeleeDamage;
-	float FinalRange = (ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 100.0f : ToolItemData.QuickMeleeRange;
-	float FinalCooldown = (ToolItemData.QuickMeleeType == EMeleeAttackType::FistPunch) ? 0.4f : ToolItemData.QuickMeleeCooldown;
-
-	UHealthComponent* Health = MyOwner->FindComponentByClass<UHealthComponent>();
-	UStaminaComponent* Stamina = MyOwner->FindComponentByClass<UStaminaComponent>();
-
-	float StaminaCost = ToolItemData.StaminaCostPerAttack * 0.5f;
-
-	if (Health)
-	{
-		float LeftArmPain = Health->GetActionPainCost(EAnatomicalLimb::LeftArm);
-		if (LeftArmPain > 0.0f)
-		{
-			Health->TakeDamage(LeftArmPain, FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt")));
-
-			if (Stamina)
-			{
-				StaminaCost = FMath::Max(StaminaCost, Stamina->GetCurrentStamina() * 0.5f);
-			}
-
-#if !UE_BUILD_SHIPPING
-			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red,
-				FString::Printf(TEXT("⚠️ [BÓL] Cios zwichniętym barkiem! -%.1f HP i utrata staminy!"), LeftArmPain));
-#endif
-		}
-	}
-
-	if (Stamina && !Stamina->TryConsumeStamina(StaminaCost)) return;
-
-	bCanQuickMelee = false;
-	ExecuteQuickMeleeEffect();
-
-	APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
-	if (CamMgr)
-	{
-		FVector Start = CamMgr->GetCameraLocation();
-		FVector End = Start + (CamMgr->GetCameraRotation().Vector() * FinalRange);
-
-		FHitResult Hit;
-		FCollisionQueryParams Params;
-		Params.AddIgnoredActor(this);
-		Params.AddIgnoredActor(GetOwner());
-
-		FCollisionObjectQueryParams ObjectQueryParams;
-		ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
-		ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
-		ObjectQueryParams.AddObjectTypesToQuery(ECC_PhysicsBody);
-		ObjectQueryParams.AddObjectTypesToQuery(ECC_Pawn);
-
-		bool bHit = GetWorld()->SweepSingleByObjectType(Hit, Start, End, FQuat::Identity, ObjectQueryParams, FCollisionShape::MakeSphere(25.0f), Params);
-
-#if !UE_BUILD_SHIPPING
-		DrawDebugSphere(GetWorld(), bHit ? Hit.ImpactPoint : End, 25.0f, 12, bHit ? FColor::Cyan : FColor::Yellow, false, 1.5f);
-#endif
-
-		if (bHit && Hit.GetActor())
-		{
-			static const FGameplayTag BluntTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Blunt"), false);
-			ApplyMeleeHit(Hit.GetActor(), FinalDamage, BluntTag, FGameplayTag(), 0.0f);
-		}
-	}
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().SetTimer(QuickMeleeTimerHandle, this, &ABaseTool::ResetQuickMeleeCooldown, FinalCooldown, false);
 	}
 }
 
@@ -604,9 +674,12 @@ void ABaseTool::ApplyMeleeHit(AActor* TargetActor, float PhysicalDamage, FGamepl
 	}
 
 	// 3. EFEKT CHEMICZNY / STATUS (Podpalenie / Przewodnictwo):
-	if (StateTag.IsValid() && Receiver)
+	if (StateTag.IsValid() && Intensity > 0.0f)
 	{
-		Receiver->ApplyStateImpact(StateTag, Intensity);
+		if (TargetActor->FindComponentByClass<UReactionReceiverComponent>())
+		{
+			Receiver->ApplyStateImpact(StateTag, Intensity);
+		}
 	}
 }
 
@@ -614,6 +687,13 @@ bool ABaseTool::TryConsumeResources(bool bIsHeavy)
 {
 	AActor* MyOwner = GetOwner();
 	if (!MyOwner) return false;
+	bool bIsPlayerInGuard = false;
+	if (UStatusEffectComponent* StatusComp = MyOwner->FindComponentByClass<UStatusEffectComponent>())
+	{
+		static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
+		bIsPlayerInGuard = StatusComp->HasStatusEffect(GuardTag);
+	}
+
 
 	float RequiredStamina = bIsHeavy ? ToolItemData.HeavyAttackStaminaCost : ToolItemData.StaminaCostPerAttack;
 
@@ -631,6 +711,11 @@ bool ABaseTool::TryConsumeResources(bool bIsHeavy)
 		{
 			return false;
 		}
+	}
+
+	if (bIsPlayerInGuard)
+	{
+		return true; // Pchnięcie bronią nie zużywa ani kropli nafty ani amunicji!
 	}
 
 	// 2. PALIWO / AMUNICJA:

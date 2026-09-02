@@ -4,18 +4,23 @@
 #include "GameplayTagContainer.h"
 #include "AISensoryTypes.generated.h"
 
-// 4 Główne Stany Behawioralne Potwora (Dla Behavior Tree / Blueprinta)
+// ====================================================================
+// 1. STANY BEHAWIORALNE POTWORA
+// ====================================================================
 UENUM(BlueprintType)
 enum class EAIBehaviorState : uint8
 {
 	Idle_Patrol		UMETA(DisplayName = "Patrol / Spoczynek"),
-	Suspicious		UMETA(DisplayName = "Zaniepokojony (Nasłuchiwanie)"), // <--- NOWY STAN!
+	Suspicious		UMETA(DisplayName = "Zaniepokojony (Nasłuchiwanie / Ryk)"),
+	Cautious		UMETA(DisplayName = "Czujny / Ostrożny (Przeczesywanie terenu)"),
 	Investigate		UMETA(DisplayName = "Badanie Punktu (Hałas / Zapach)"),
 	Chase_Attack	UMETA(DisplayName = "Pościg i Atak (Wykrycie)"),
 	Flee_Panic		UMETA(DisplayName = "Panika i Ucieczka")
 };
 
-// Zdarzenie zmysłowe (Punkt Hałasu lub Plama Zapachu)
+// ====================================================================
+// 2. STIMULUS EVENT (Zdarzenie zmysłowe w świecie)
+// ====================================================================
 USTRUCT(BlueprintType)
 struct FImSimStimulusEvent
 {
@@ -25,60 +30,104 @@ struct FImSimStimulusEvent
 	FVector Location = FVector::ZeroVector;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	FGameplayTag StimulusTag; // Np. State.Element.Acoustics.Noise lub Scent.Type.Blood
+	FGameplayTag StimulusTag;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	float IntensityRadius = 300.0f; // Promień rozchodzenia w cm
+	float IntensityRadius = 300.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
-	float ExpirationTime = 0.0f; // Kiedy bodziec znika ze świata
+	float ExpirationTime = 0.0f;
 };
 
-// Pełna Matryca Zmysłów Potwora (Konfigurowalna w Details każdego Blueprinta!)
+// ====================================================================
+// 3. PEŁNY PROFIL ZMYSŁÓW POTWORA (Details Panel w Unreal)
+// ====================================================================
 USTRUCT(BlueprintType)
 struct FAISensoryProfile
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight & Proximity")
-	float ProximitySenseRadius = 140.0f; // Zmysł dotyku/obecności (odległość na wyciągnięcie ręki)
+	// ==========================================================
+	// 1. WZROK I BLISKOŚĆ
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight & Proximity", meta = (ToolTip = "Dystans (cm), z którego potwór zawsze wyczuwa gracza i natychmiast atakuje."))
+	float ProximitySenseRadius = 140.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight & Proximity", meta = (ToolTip = "Maksymalny zasięg wzroku w pełnym świetle (0 = ślepy)."))
+	float SightRadius = 1500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight & Proximity", meta = (ToolTip = "Kąt stożka widzenia (np. 60 = 120 stopni przed potworem)."))
+	float PeripheralVisionAngle = 60.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight & Proximity", meta = (ToolTip = "Jeśli PRAWDA, potwór ignoruje ciemność i widzi gracza w 100% mroku."))
+	bool bHasNightVision = false;
 
 	// ==========================================================
-	// 1. WZROK (Sight)
+	// 2. SŁUCH I AKUSTYKA
 	// ==========================================================
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight")
-	float SightRadius = 1500.0f; // 0 = Ślepy potwór (np. Słuchacz)
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "1. Sight")
-	float PeripheralVisionAngle = 60.0f; // Kąt stożka widzenia (w stopniach)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "2. Hearing & Acoustics", meta = (ToolTip = "Czułość słuchu. 1.0 = standard, 2.0 = słyszy 2x dalej."))
+	float HearingSensitivity = 1.0f;
 
 	// ==========================================================
-	// 2. SŁUCH (Hearing)
+	// 3. WĘCH I TROPIENIE
 	// ==========================================================
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "2. Hearing")
-	float HearingSensitivity = 1.0f; // 0 = Głuchy, 2.0 = Wyostrzony słuch
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Scent & Tracking", meta = (ToolTip = "Tagi zapachów, za którymi potwór podąża (np. Scent.Type.Blood)."))
+	FGameplayTagContainer TrackedScents;
 
-	// ==========================================================
-	// 3. WĘCH (Scent Matrix)
-	// ==========================================================
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Scent")
-	FGameplayTagContainer TrackedScents; // Np. Scent.Type.Blood, Scent.Type.Bait
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Scent")
-	float ScentTrackingRadius = 2500.0f; // Zasięg nosa w cm
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Scent & Tracking", meta = (ToolTip = "Z jakiej odległości potwór potrafi wyczuć pojedynczą plamę zapachu."))
+	float ScentTrackingRadius = 2500.0f;
 
 	// ==========================================================
-	// 4. ZMYSŁY LOVECRAFTOWSKIE / NADNATURALNE
+	// 4. KOSMICZNY HORROR I SANITY
 	// ==========================================================
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Senses")
-	bool bHuntsLowSanity = false; // Wyczuwanie pękającego umysłu
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Horror & Sanity", meta = (ToolTip = "Jeśli PRAWDA, patrzenie na tego potwora drenuje Sanity gracza (Gaze Dread). Domyślnie FAŁSZ dla ludzi!"))
+	bool bCausesGazeDread = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Senses", meta = (EditCondition = "bHuntsLowSanity"))
-	float SanityHuntThreshold = 0.35f; // Poniżej 35% Sanity potwór wyczuwa gracza w mroku
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Horror & Sanity", meta = (EditCondition = "bCausesGazeDread", ToolTip = "Ile punktów Sanity na sekundę traci gracz, gdy wpatruje się w tego potwora."))
+	float GazeDreadDrainRate = 4.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Senses")
-	bool bIsPhototropic = false; // Łaknienie światła (Leci do zapalonej latarni!)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Horror & Sanity", meta = (ToolTip = "Jeśli PRAWDA, potwór wyczuwa gracza w mroku, gdy ten traci poczytalność."))
+	bool bHuntsLowSanity = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Senses")
-	bool bFleesFromLight = false; // Strach przed światłem (Ucieka w mrok)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Horror & Sanity", meta = (EditCondition = "bHuntsLowSanity", ToolTip = "Poniżej jakiego % Sanity (np. 0.35) potwór zaczyna wyczuwać gracza."))
+	float SanityHuntThreshold = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "4. Cosmic Horror & Sanity", meta = (ToolTip = "Jeśli PRAWDA, potwór wyczuwa zadyszkę i ciężki oddech gracza (bIsFatigued)."))
+	bool bHearsExhaustedBreath = false;
+
+	// ==========================================================
+	// 5. MANEKINY I SPOJRZENIE
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5. Mannequin & Gaze", meta = (ToolTip = "Jeśli PRAWDA, potwór atakuje, gdy gracz spojrzy mu w twarz (Złoty Aktor)."))
+	bool bTriggeredByDirectGaze = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "5. Mannequin & Gaze", meta = (ToolTip = "Jeśli PRAWDA, potwór zastyga w bezruchu, gdy na niego patrzymy lub widzi swoje odbicie w lustrze."))
+	bool bFreezesWhenObserved = false;
+
+	// ==========================================================
+	// 6. INTERAKCJE ZE ŚWIATŁEM
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "6. Light Interactions", meta = (ToolTip = "Jeśli PRAWDA, potwór jest przyciągany przez zapalona latarnię (Cień-Złodziej)."))
+	bool bIsPhototropic = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "6. Light Interactions", meta = (ToolTip = "Jeśli PRAWDA, potwór ucieka w mrok, gdy gracz włączy latarnię [F]."))
+	bool bFleesFromLight = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "6. Light Interactions", meta = (ToolTip = "Jeśli PRAWDA, potwór boi się wejść w oświetloną strefę (np. stoi na krawędzi cienia)."))
+	bool bStopsAtLight = false;
+
+	// ==========================================================
+	// 7. ZACHOWANIE I WALKA
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "7. Behavior & Combat", meta = (ToolTip = "Jeśli PRAWDA, potwór NIGDY nie atakuje fizycznie (tylko np. pożera naftę albo ucieka)."))
+	bool bIsPacifist = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "7. Behavior & Combat", meta = (ToolTip = "Czas zastygania/ryku potwora w ułamku sekundy przed rozpoczęciem sprintu."))
+	float AggroTelegraphDuration = 0.8f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "7. Behavior & Combat", meta = (ToolTip = "Czas trwania stanu podwyższonej czujności po otrzymaniu ciosu lub wykryciu rzutu."))
+	float AgitationDuration = 6.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "7. Behavior & Combat", meta = (ToolTip = "Jeśli PRAWDA, potwór panicznie ucieka, gdy zostanie podpalony (Burning)."))
+	bool bFleesFromFire = true;
 };

@@ -1,6 +1,9 @@
 ﻿#include "InteractionComponent.h"
 #include "BaseInteractable.h"
 #include "ProgressionComponent.h"
+#include "ReactionReceiverComponent.h"
+#include "ImSimSensorySubsystem.h"
+#include "ProgressionComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "Camera/CameraComponent.h"
@@ -101,6 +104,15 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	// 1. Aktualizacja celownika
 	UpdateCrosshairState(HeldType, bHolding);
 
+	if (bHolding && HeldType == EInteractionType::Grab_Free)
+	{
+		ProcessHeldObjectHazardConduction(DeltaTime);
+	}
+	else
+	{
+		HeldPropBurnExposureTimer = 0.0f;
+	}
+
 	// 2. Fizyka trzymania
 	if (bHolding && HoldSlotComponent && PhysicsHandle)
 	{
@@ -121,7 +133,7 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 				if (LagDistSq > (DynamicMaxLag * DynamicMaxLag))
 				{
-					// Dłuższy czas (0.75s) – puszczamy tylko przy rzeczywistym zablokowaniu za przeszkodą
+					// Dłuższy czas (0.75s) – puszczamos tylko przy rzeczywistym zablokowaniu za przeszkodą
 					ObstacleLagTimer += DeltaTime;
 					if (ObstacleLagTimer > 0.75f)
 					{
@@ -138,16 +150,53 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 				ACharacter* Char = Cast<ACharacter>(Owner);
 				const float CapsuleRadius = Char && Char->GetCapsuleComponent() ? Char->GetCapsuleComponent()->GetScaledCapsuleRadius() : 45.0f;
 
-				// Minimalny dystans trzymania, uniemożliwiający wejście obiektu w gracza
+				// Minimalny dystans trzymania
 				float DesiredForwardDistance = HoldSlotComponent->GetRelativeLocation().X;
 				const float MinSafeDist = CapsuleRadius + (ObjectRadius * 0.6f) + 15.0f;
 				DesiredForwardDistance = FMath::Max(DesiredForwardDistance, MinSafeDist);
 
-				// Płynna interpolacja dystansu i pozycji docelowej
+				// Płynna interpolacja dystansu 
 				SmoothedHoldDistance = FMath::FInterpTo(SmoothedHoldDistance, DesiredForwardDistance, DeltaTime, 15.0f);
-				FVector DesiredHoldLoc = CameraLoc + (CameraForward * SmoothedHoldDistance);
 
-				SmoothedHoldLocation = FMath::VInterpTo(SmoothedHoldLocation, DesiredHoldLoc, DeltaTime, 25.0f);
+				// ====================================================================
+				// FIX: HYBRYDOWY SWEEP Z TŁUMIENIEM DLA DUŻYCH SKRZYŃ I DROP > 100KG
+				// ====================================================================
+				FVector IdealHoldLoc = CameraLoc + (CameraForward * SmoothedHoldDistance);
+				FVector ActualTargetLoc = IdealHoldLoc;
+
+				FHitResult SweepHit;
+				FCollisionQueryParams SweepParams;
+				SweepParams.AddIgnoredActor(Owner);
+				SweepParams.AddIgnoredActor(GrabbedActor); // Ignorujemy to, co trzymamy
+
+				// Używamy sfery dopasowanej do gabarytu obiektu
+				float SweepRadius = FMath::Clamp(ObjectRadius * 0.75f, 5.0f, 40.0f);
+
+				// Skanujemy drogę od kamery do idealnego punktu
+				bool bHit = GetWorld()->SweepSingleByChannel(
+					SweepHit,
+					CameraLoc,
+					IdealHoldLoc,
+					FQuat::Identity,
+					ECC_Visibility,
+					FCollisionShape::MakeSphere(SweepRadius),
+					SweepParams
+				);
+
+				if (bHit)
+				{
+					const float AbsoluteMinSafeDist = CapsuleRadius + ObjectRadius + 15.0f;
+					float ClampedTargetDist = FMath::Max(SweepHit.Distance, AbsoluteMinSafeDist);
+
+					// Łagodne tłumienie auto-zoomu dla dużych obiektów
+					float SizeZoomAlpha = FMath::Clamp(1.0f - ((ObjectRadius - 25.0f) / 35.0f), 0.15f, 1.0f);
+
+					FVector ClampedTargetLoc = CameraLoc + (CameraForward * ClampedTargetDist);
+					ActualTargetLoc = FMath::Lerp(IdealHoldLoc, ClampedTargetLoc, SizeZoomAlpha);
+				}
+
+				// Teraz interpolujemy do RZECZYWISTEGO, zablokowanego punktu
+				SmoothedHoldLocation = FMath::VInterpTo(SmoothedHoldLocation, ActualTargetLoc, DeltaTime, 25.0f);
 
 				// ====================================================================
 				// TŁUMIK WIROWANIA PRZY KOLIZJACH (BLOKADA SKRĘCANIA W RĘKACH):
@@ -175,6 +224,47 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 			}
 		}
 	}
+
+#if !UE_BUILD_SHIPPING
+	FHitResult DiagHit;
+	if (PerformLineTrace(DiagHit) && DiagHit.GetActor())
+	{
+		AActor* FocusActor = DiagHit.GetActor();
+		if (FocusActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+		{
+			EInteractionType FType = IPhysicalInteract::Execute_GetInteractionType(FocusActor);
+			bool bLocked = IPhysicalInteract::Execute_IsLocked(FocusActor);
+			bool bLatched = IPhysicalInteract::Execute_IsLatched(FocusActor);
+
+			UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(FocusActor->GetRootComponent());
+			if (!Prim) Prim = FocusActor->FindComponentByClass<UPrimitiveComponent>();
+
+			bool bPhysics = Prim ? Prim->IsSimulatingPhysics() : false;
+			float YawAngle = Prim ? Prim->GetRelativeRotation().Yaw : 0.0f;
+
+			FString TypeStr;
+			switch (FType)
+			{
+			case EInteractionType::Hinge: TypeStr = TEXT("Hinge (Drzwi)"); break;
+			case EInteractionType::Bolt: TypeStr = TEXT("Bolt (Zasuwka)"); break;
+			case EInteractionType::Crank: TypeStr = TEXT("Crank (Zawór)"); break;
+			case EInteractionType::Translation: TypeStr = TEXT("Translation (Szuflada)"); break;
+			case EInteractionType::Grab_Free: TypeStr = TEXT("Grab_Free (Prop)"); break;
+			}
+
+			FColor StateColor = bLocked ? FColor::Red : (bLatched ? FColor::Yellow : FColor::Green);
+			FString LockedStr = bLocked ? TEXT("🔒 ZABLOKOWANY") : TEXT("🔓 ODBLOKOWANY");
+			FString LatchedStr = bLatched ? TEXT("ZATRZASK: TAK") : TEXT("ZATRZASK: NIE");
+
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage((uint64)FocusActor->GetUniqueID() + 600, 0.15f, StateColor,
+					FString::Printf(TEXT("🚪 [%s] Typ: %s | %s | %s | Kąt: %.1f° | Fizyka: %s"),
+						*FocusActor->GetName(), *TypeStr, *LockedStr, *LatchedStr, YawAngle, bPhysics ? TEXT("WŁ") : TEXT("WYŁ")));
+			}
+		}
+	}
+#endif
 }
 
 bool UInteractionComponent::PerformLineTrace(FHitResult& OutHit)
@@ -237,14 +327,20 @@ void UInteractionComponent::StartInteraction()
 
 		if (HitActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 		{
+			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(HitActor);
+
+			if (Type == EInteractionType::Bolt)
+			{
+				QuickInteraction(); // Wywołujemy jedną dedykowaną funkcję!
+				return;
+			}
+
 			if (IPhysicalInteract::Execute_IsLocked(HitActor))
 			{
 				// [LPM] Odpala Twój ORYGINALNY EFEKT w BP_BaseDoor:
 				IPhysicalInteract::Execute_OnLockedInteraction(HitActor, Owner);
 				return; // Nie chwyta klamki!
 			}
-
-			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(HitActor);
 
 			switch (Type)
 			{
@@ -271,11 +367,9 @@ void UInteractionComponent::StartInteraction()
 				if (PropSize.MatchesTag(HeavyPropTag))
 				{
 					bool bCanLiftHeavy = false;
-					// Pytamy tylko, czy nasz Owner posiada komponent progresji:
 					if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
 					{
-						static const FGameplayTag HeavyLifterTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.HeavyLifter"), false);
-						bCanLiftHeavy = ProgComp->HasPerk(HeavyLifterTag);
+						bCanLiftHeavy = ProgComp->CanLiftHeavyProps(); // BRAMKA ZDOLNOŚCI!
 					}
 
 					// Jeśli nie ma Perka (lub w ogóle nie ma systemu progresji) -> ODRZUCAMY CHWYT!
@@ -290,6 +384,8 @@ void UInteractionComponent::StartInteraction()
 
 				GrabbedActor = HitActor;
 				GrabbedComponent = MeshToGrab;
+
+				//GrabbedComponent->OnComponentHit.AddUniqueDynamic(this, &UInteractionComponent::OnGrabbedComponentHit);
 
 				IPhysicalInteract::Execute_GrabObject(GrabbedActor, Owner);
 
@@ -349,12 +445,12 @@ void UInteractionComponent::StartInteraction()
 					const float ActualMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
 					const float MassFactor = FMath::Clamp(1.0f - (ActualMass / 150.0f), 0.35f, 1.0f);
 
-					PhysicsHandle->LinearStiffness = 1500.0f * MassFactor;
-					PhysicsHandle->LinearDamping = 35.0f * MassFactor;
+					PhysicsHandle->LinearStiffness = 650.0f; // Stała sztywność rąk
+					PhysicsHandle->LinearDamping = 45.0f;    // Płynne wyhamowywanie
 
-					PhysicsHandle->AngularStiffness = 2500.0f;
-					PhysicsHandle->AngularDamping = 180.0f;
-					PhysicsHandle->InterpolationSpeed = 50.0f;
+					PhysicsHandle->AngularStiffness = 1500.0f;
+					PhysicsHandle->AngularDamping = 80.0f;
+					PhysicsHandle->InterpolationSpeed = 35.0f;
 
 					PhysicsHandle->GrabComponentAtLocationWithRotation(
 						GrabbedComponent,
@@ -515,11 +611,31 @@ void UInteractionComponent::SlamInteraction(float CustomMultiplier)
 
 			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower * CustomMultiplier);
 		}
-		else
+		else if (Type == EInteractionType::Hinge || Type == EInteractionType::Translation)
 		{
+			// Emisja hałasu trzaśnięcia drzwiami:
+			if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+			{
+				static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+
+				FGameplayTag MatTag;
+				if (GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+				{
+					// POBIERAMY PRAWDZIWY MATERIAŁ (GetMaterialTag zamiast rozmiaru!):
+					MatTag = IPhysicalInteract::Execute_GetMaterialTag(GrabbedActor);
+				}
+
+				// Bazowa siła trzaśnięcia (np. 800 cm = 8 metrów dla drewna, 12 metrów dla stali):
+				float SlamNoiseRadius = (BaseThrowPower * CustomMultiplier) * 1.2f;
+
+				// JEDNO ZUNIFIKOWANE WYWOŁANIE (Subsystem sam pomnoży przez stal/drewno!):
+				Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), SlamNoiseRadius, NoiseTag, MatTag);
+			}
+
 			GrabbedComponent = nullptr;
 			IPhysicalInteract::Execute_SlamObject(GrabbedActor, Forward, BaseThrowPower * CustomMultiplier);
 		}
+
 
 		CleanupInteraction();
 	}
@@ -527,7 +643,25 @@ void UInteractionComponent::SlamInteraction(float CustomMultiplier)
 
 void UInteractionComponent::StartSlamCharge()
 {
-	SlamChargeStartTime = GetWorld()->GetTimeSeconds();
+	// Ładowanie rzutu (PPM) wymaga Wigoru Tier 1:
+	bool bCanChargeThrow = false;
+	if (AActor* Owner = GetOwner())
+	{
+		if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+		{
+			// ODPYTUJEMY BRAMKĘ ZDOLNOŚCI (Wigor 1A):
+			bCanChargeThrow = ProgComp->CanPerformHeavyMelee();
+		}
+	}
+
+	if (bCanChargeThrow)
+	{
+		SlamChargeStartTime = GetWorld()->GetTimeSeconds();
+	}
+	else
+	{
+		SlamChargeStartTime = 0.0f; // Gracz bez siły wyrzuca od razu z bazową siłą 1.0x
+	}
 }
 
 void UInteractionComponent::ReleaseSlamThrow()
@@ -606,7 +740,9 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 		}
 	}
 
+	// ====================================================================
 	// 1. TRYB INSPEKCJI 3D
+	// ====================================================================
 	if (bIsInspecting && IsValid(GrabbedActor) && HoldSlotComponent)
 	{
 		const float ObjectMass = (GrabbedComponent && GrabbedComponent->IsSimulatingPhysics())
@@ -629,7 +765,9 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 		return true;
 	}
 
+	// ====================================================================
 	// 2. FIZYCZNA MANIPULACJA MEBLAMI
+	// ====================================================================
 	if (IsValid(GrabbedActor) && GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 	{
 		EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
@@ -673,8 +811,10 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 			}
 			}
 
-			float FinalDelta = SelectedMouseDelta / ArmResistance;
-			CurrentEffortDelta = FMath::Abs(SelectedMouseDelta);
+			// Bezpieczny Clamp ucinający piki klatek:
+			float ClampedDelta = FMath::Clamp(SelectedMouseDelta, -18.0f, 18.0f);
+			float FinalDelta = ClampedDelta / ArmResistance;
+			CurrentEffortDelta = FMath::Abs(ClampedDelta);
 
 			IPhysicalInteract::Execute_MoveObject(GrabbedActor, FinalDelta);
 		}
@@ -690,19 +830,62 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 				FVector2D Dir = (MousePos - WheelPos).GetSafeNormal();
 
 				float Torque = (Dir.X * MouseY) - (Dir.Y * MouseX);
-				float FinalTorque = Torque / ArmResistance;
-				CurrentEffortDelta = FMath::Abs(Torque * 1.5f);
+				float ClampedTorque = FMath::Clamp(Torque, -20.0f, 20.0f);
+				float FinalTorque = ClampedTorque / ArmResistance;
+				CurrentEffortDelta = FMath::Abs(ClampedTorque * 1.5f);
 
 				IPhysicalInteract::Execute_MoveObject(GrabbedActor, FinalTorque);
 			}
 		}
 
-		// NALICZANIE BÓLU PRZY WYSIŁKU
+		// ====================================================================
+		// WYSIŁEK FIZYCZNY, BÓL ORAZ AKUSTYKA RUCHU MEBLA:
+		// ====================================================================
 		if (CurrentEffortDelta > 0.0f)
 		{
+			float CurrentTime = GetWorld()->GetTimeSeconds();
+
+			// ------------------------------------------------------------
+			// 1. ZBALANSOWANY HAŁAS SKRZYPIENIA DLA AI (Max 1 dźwięk co 0.65s!):
+			// ------------------------------------------------------------
+			if (CurrentEffortDelta >= 4.5f)
+			{
+				if ((CurrentTime - LastManipulationNoiseTime) >= 0.45f)
+				{
+					LastManipulationNoiseTime = CurrentTime;
+
+					if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+					{
+						FGameplayTag MatTag;
+						if (GrabbedActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+						{
+							MatTag = IPhysicalInteract::Execute_GetPropSizeTag(GrabbedActor);
+						}
+
+						float ObjectMass = (GrabbedComponent && GrabbedComponent->IsSimulatingPhysics()) ? GrabbedComponent->GetMass() : 10.0f;
+						float BaseNoise = (ObjectMass <= 12.0f) ?
+							FMath::Clamp((CurrentEffortDelta - 3.5f) * 22.0f, 70.0f, 200.0f) :
+							FMath::Clamp((CurrentEffortDelta - 3.0f) * 28.0f, 140.0f, 400.0f);
+
+						float StealthMod = 1.0f;
+						if (UProgressionComponent* ProgComp = GetOwner()->FindComponentByClass<UProgressionComponent>())
+						{
+							StealthMod = ProgComp->GetStealthNoiseMultiplier();
+						}
+
+						float FinalManipulationNoise = BaseNoise * StealthMod;
+
+						static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+						Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), FinalManipulationNoise, NoiseTag, MatTag);
+					}
+				}
+			}
+
+			// ------------------------------------------------------------
+			// 2. TWOJE ORYGINALNE NALICZANIE BÓLU PRZY USZKODZONEJ RĘCE (Nienaruszone!):
+			// ------------------------------------------------------------
 			AccumulatedMechanismEffort += CurrentEffortDelta;
 
-			float CurrentTime = GetWorld()->GetTimeSeconds();
 			bool bCooldownPassed = (CurrentTime - LastMechanismPainTime) >= 2.0f;
 			const float PainEffortThreshold = (Type == EInteractionType::Crank) ? 650.0f : 450.0f;
 
@@ -739,9 +922,17 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 
 void UInteractionComponent::CleanupInteraction()
 {
+	/*
+	if (GrabbedComponent)
+	{
+		// Odpinamy zdarzenie kolizji
+		GrabbedComponent->OnComponentHit.RemoveDynamic(this, &UInteractionComponent::OnGrabbedComponentHit);
+	}*/
+
 	bIsInspecting = false;
 	AccumulatedMechanismEffort = 0.0f;
 	LastMechanismPainTime = 0.0f;
+	HeldPropBurnExposureTimer = 0.0f;
 
 	if (ALightkeeperCharacter* Char = Cast<ALightkeeperCharacter>(GetOwner()))
 	{
@@ -814,37 +1005,38 @@ void UInteractionComponent::TryPickupFocusedObject()
 	AActor* HitActor = bHit ? Hit.GetActor() : nullptr;
 
 	// ====================================================================
-	// SCENARIUSZ A: CELUJEMY W DRZWI / ZAMEK [E] -> Otwieranie LUB Ryglowanie!
+	// WARUNEK 1: CELUJEMY W DRZWI / ZAMEK / MEBEL (Obiekt, który NIE mieści się w kieszeni!):
+	// Niezależnie czy trzymasz klucz w dłoniach [LPM], czy masz puste ręce -> ZAWSZE ODPALAMY ZAMEK!
 	// ====================================================================
 	if (HitActor && HitActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 	{
-		// Czyste zapytanie czy to zamek (jeśli nie, funkcja zostanie zignorowana w meblu):
-		IPhysicalInteract::Execute_TryUnlockFromInput(HitActor, GetOwner());
-		return;
-	}
-
-	// ====================================================================
-	// SCENARIUSZ B: Trzymamy mały przedmiot w dłoni i wciskamy [E] w pustkę -> Chowamy do plecaka
-	// ====================================================================
-	if (GrabbedActor)
-	{
-		if (GrabbedActor->Implements<UPhysicalInteract>())
+		// Jeśli cel to mebel/drzwi (CanBePocketed == false):
+		if (!IPhysicalInteract::Execute_CanBePocketed(HitActor))
 		{
-			if (IPhysicalInteract::Execute_CanBePocketed(GrabbedActor))
-			{
-				AActor* ActorToPocket = GrabbedActor;
-				StopInteraction();
-				IPhysicalInteract::Execute_PickupObject(ActorToPocket, GetOwner());
-				return;
-			}
+			IPhysicalInteract::Execute_TryUnlockFromInput(HitActor, GetOwner());
+			return; // Otwiera zamek kluczem z dłoni, chowa go do plecaka LUB otwiera Perkiem!
 		}
-		return;
 	}
 
 	// ====================================================================
-	// SCENARIUSZ C: Puste ręce -> Podniesienie przedmiotu do plecaka
+	// WARUNEK 2: TRZYMAMY KLUCZ W DŁONIACH (LPM Grab) I CELUJEMY W PUSTKĘ / PODŁOGĘ:
+	// -> Wtedy i tylko wtedy chowamy trzymany przedmiot do plecaka!
 	// ====================================================================
-	if (HitActor)
+	if (GrabbedActor && GrabbedActor->Implements<UPhysicalInteract>())
+	{
+		if (IPhysicalInteract::Execute_CanBePocketed(GrabbedActor))
+		{
+			AActor* ActorToPocket = GrabbedActor;
+			StopInteraction();
+			IPhysicalInteract::Execute_PickupObject(ActorToPocket, GetOwner());
+			return;
+		}
+	}
+
+	// ====================================================================
+	// WARUNEK 3: PUSTE RĘCE -> Podnosimy leżący na stole klucz/butelkę (CanBePocketed == true) do plecaka:
+	// ====================================================================
+	if (HitActor && HitActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 	{
 		IPhysicalInteract::Execute_PickupObject(HitActor, GetOwner());
 	}
@@ -861,5 +1053,63 @@ void UInteractionComponent::TryQuickConsumeFocusedObject()
 		{
 			IPhysicalInteract::Execute_ConsumeObject(HitActor, GetOwner());
 		}
+	}
+}
+
+void UInteractionComponent::ProcessHeldObjectHazardConduction(float DeltaTime)
+{
+	if (!GrabbedActor)
+	{
+		HeldPropBurnExposureTimer = 0.0f;
+		return;
+	}
+
+	if (UReactionReceiverComponent* PropReaction = GrabbedActor->FindComponentByClass<UReactionReceiverComponent>())
+	{
+		static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
+		static const FGameplayTag ElectrocutedStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
+		static const FGameplayTag FireElement = FGameplayTag::RequestGameplayTag(FName("State.Element.Thermal.Fire"), false);
+		static const FGameplayTag ElectricityElement = FGameplayTag::RequestGameplayTag(FName("State.Element.Electricity.Current"), false);
+
+		// 1. ELEKTRYCZNOŚĆ: Natychmiastowe porażenie + Drop z rąk:
+		if (PropReaction->HasState(ElectrocutedStatus))
+		{
+			if (UReactionReceiverComponent* PlayerReaction = GetOwner()->FindComponentByClass<UReactionReceiverComponent>())
+			{
+				PlayerReaction->ApplyStateImpact(ElectricityElement, 1.0f);
+			}
+
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan, TEXT("⚡ [PRĄD] Trzymany obiekt poraził dłonie! Upuszczono!"));
+#endif
+			StopInteraction();
+			return;
+		}
+
+		// 2. OGIEŃ: Nagrzewanie i podpalenie po 1.5 sekundy ciągłego trzymania:
+		if (PropReaction->HasState(BurningStatus))
+		{
+			HeldPropBurnExposureTimer += DeltaTime;
+			if (HeldPropBurnExposureTimer >= 1.5f)
+			{
+				HeldPropBurnExposureTimer = 0.0f;
+				if (UReactionReceiverComponent* PlayerReaction = GetOwner()->FindComponentByClass<UReactionReceiverComponent>())
+				{
+					PlayerReaction->ApplyStateImpact(FireElement, 1.0f);
+				}
+
+#if !UE_BUILD_SHIPPING
+				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Red, TEXT("🔥 [OGIEŃ] Płonący obiekt poparzył dłonie!"));
+#endif
+			}
+		}
+		else
+		{
+			HeldPropBurnExposureTimer = 0.0f;
+		}
+	}
+	else
+	{
+		HeldPropBurnExposureTimer = 0.0f;
 	}
 }

@@ -2,8 +2,12 @@
 #include "SafeLightComponent.h"
 #include "LightkeeperCharacter.h"
 #include "LanternComponent.h"
+#include "SensoryComponent.h"
+#include "EngineUtils.h"
 #include "Engine/Engine.h"
 #include "TimerManager.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Kismet/GameplayStatics.h" 
 
 USanityComponent::USanityComponent()
 {
@@ -21,6 +25,7 @@ void USanityComponent::BeginPlay()
 	bIsGracePeriodActive = false;
 	bIsAdrenalineActive = false;
 	bIsInDarkness = true;
+	bIsLookingAtMonster = false;
 }
 
 void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -29,13 +34,13 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 	bool bIsPhysicallyIlluminated = false;
 
-	// 1. NAJPIERW SPRAWDZAMY CZY JESTEŚMY W BEZPIECZNYM POKOJU (Sanctuary):
+	// 1. BEZPIECZNY POKÓJ (Sanctuary):
 	if (IsInSanctuary())
 	{
 		bIsPhysicallyIlluminated = true;
 	}
 
-	// 2. NASTĘPNIE SPRAWDZAMY CZY LATARNIA GRACZA JEST WŁĄCZONA:
+	// 2. LATARNIA GRACZA:
 	if (!bIsPhysicallyIlluminated)
 	{
 		if (ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(GetOwner()))
@@ -47,24 +52,26 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 		}
 	}
 
-	// 3. JEŚLI LATARNIA JEST ZGASZONA -> SPRAWDZAMY ZEWNĘTRZNE ŚWIATŁA ZE ŚWIATA (RAYCAST):
+	// 3. ŚWIATŁA ZEWNĘTRZNE (LineTrace):
 	if (!bIsPhysicallyIlluminated)
 	{
 		bIsPhysicallyIlluminated = CheckLightLineOfSight();
 	}
 
-	// 4. DOPIERO TERAZ PRZYPISUJEMY WYNIK DO GŁÓWNEJ ZMIENNEJ:
 	bIsInDarkness = !bIsPhysicallyIlluminated;
 
+	// ====================================================================
+	// 4. KOSZMAR SPOJRZENIA (Gaze Dread - działa ZAWSZE, nawet w świetle!):
+	// ====================================================================
+	EvaluateMonsterGazeDread(DeltaTime);
 
 	// ====================================================================
-	// 1. W MROKU
+	// 5. OBSŁUGA MROKU I ŚWIATŁA:
 	// ====================================================================
 	if (bIsInDarkness)
 	{
 		TimeInDarkness += DeltaTime;
 
-		// Płynny drenaż: im bliżej krawędzi światła stoisz, tym drenaż jest wolniejszy (nawet o 85%!):
 		float LightProximityPenalty = 1.0f;
 		if (OverlappingLightSources.Num() > 0)
 		{
@@ -78,7 +85,7 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 					HighestAlpha = FMath::Max(HighestAlpha, Alpha);
 				}
 			}
-			LightProximityPenalty = FMath::Clamp(1.0f - HighestAlpha, 0.15f, 1.0f); // Do 85% wolniejszy drenaż przy krawędzi!
+			LightProximityPenalty = FMath::Clamp(1.0f - HighestAlpha, 0.15f, 1.0f);
 		}
 
 		float CurrentDrain = (BaseDarknessDrainRate * LightProximityPenalty) * (1.0f + (TimeInDarkness * DarknessAccelerationFactor));
@@ -89,7 +96,6 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 		CurrentSanity = FMath::Clamp(CurrentSanity - (CurrentDrain * DeltaTime), MinAllowedSanity, GetMaxSanity());
 		OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
 
-		// Zapisujemy traumę TYLKO WTEDY, gdy nie trwa Grace Period:
 		if (!bIsGracePeriodActive)
 		{
 			float CurrentSanityPercent = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
@@ -106,9 +112,6 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 			HandleSanityDepleted();
 		}
 	}
-	// ====================================================================
-	// 2. W ŚWIETLE / BEZPIECZNYM POKOJU
-	// ====================================================================
 	else
 	{
 		TimeInDarkness = 0.0f;
@@ -122,6 +125,69 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 
 			CurrentSanity = FMath::FInterpConstantTo(CurrentSanity, DynamicCap, DeltaTime, EffectiveRecoverySpeed);
 			OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+		}
+	}
+}
+
+void USanityComponent::EvaluateMonsterGazeDread(float DeltaTime)
+{
+	APawn* PlayerPawn = Cast<APawn>(GetOwner());
+	if (!PlayerPawn) return;
+
+	APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (!CamMgr) return;
+
+	FVector CameraLocation = CamMgr->GetCameraLocation();
+	FVector CameraForward = CamMgr->GetCameraRotation().Vector();
+	FVector TraceEnd = CameraLocation + (CameraForward * 2000.0f); // 20 metrów z celownika
+
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(PlayerPawn);
+
+	if (UInteractionComponent* InterComp = PlayerPawn->FindComponentByClass<UInteractionComponent>())
+	{
+		if (InterComp->GrabbedActor)
+		{
+			Params.AddIgnoredActor(InterComp->GrabbedActor);
+		}
+	}
+
+	bIsLookingAtMonster = false;
+	FHitResult Hit;
+
+	// Sferyczny promień spojrzenia (grubość 25 cm) zapobiegający mruganiu:
+	FCollisionShape EyeSphere = FCollisionShape::MakeSphere(25.0f);
+
+	bool bHit = GetWorld()->SweepSingleByChannel(Hit, CameraLocation, TraceEnd, FQuat::Identity, ECC_Visibility, EyeSphere, Params);
+
+	if (!bHit)
+	{
+		bHit = GetWorld()->SweepSingleByChannel(Hit, CameraLocation, TraceEnd, FQuat::Identity, ECC_Pawn, EyeSphere, Params);
+	}
+
+	if (bHit && Hit.GetActor())
+	{
+		AActor* HitActor = Hit.GetActor();
+
+		if (USensoryComponent* MonsterSensory = HitActor->FindComponentByClass<USensoryComponent>())
+		{
+			if (MonsterSensory->SensoryProfile.bCausesGazeDread)
+			{
+				float DrainRate = MonsterSensory->SensoryProfile.GazeDreadDrainRate;
+				if (DrainRate <= 0.0f) DrainRate = 4.0f;
+
+				bIsLookingAtMonster = true;
+				float GazeDamage = DrainRate * DeltaTime;
+				TakeSanityDamage(GazeDamage);
+
+#if !UE_BUILD_SHIPPING
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage((uint64)HitActor->GetUniqueID() + 500, 0.2f, FColor::Purple,
+						FString::Printf(TEXT("👁️ [GROZA SPOJRZENIA] Wpatrujesz się w [%s]! -%.1f Sanity/s"), *HitActor->GetName(), DrainRate));
+				}
+#endif
+			}
 		}
 	}
 }
@@ -141,8 +207,8 @@ void USanityComponent::HandleSanityDepleted()
 	if (MentalCollapseCount >= 3) return;
 
 	MentalCollapseCount++;
-	bIsGracePeriodActive = true; // Włączamy 10s ochrony
-	bIsAdrenalineActive = true;   // Gotowy na szybki zryw w świetle
+	bIsGracePeriodActive = true;
+	bIsAdrenalineActive = true;
 
 	if (UWorld* World = GetWorld())
 	{
@@ -150,28 +216,27 @@ void USanityComponent::HandleSanityDepleted()
 		World->GetTimerManager().SetTimer(AdrenalineTimerHandle, this, &USanityComponent::EndAdrenalineSurge, AdrenalineDuration, false);
 	}
 
-	// ====================================================================
-	// RESET TRAUMY: Pozwala na wyleczenie się w świetle do PEŁNEGO nowego limitu!
-	// ====================================================================
 	if (MentalCollapseCount == 1)
 	{
-		MaxSanityCapMultiplier = 0.75f; // Nowy limit: 75.0
+		MaxSanityCapMultiplier = 0.75f;
 		LowestSanityPercentInDarkness = 1.0f;
-		CurrentSanity = BaseMaxSanity * 0.25f; // <--- ZAWSZE RÓWNE 25.0 PKT!
+		CurrentSanity = BaseMaxSanity * 0.25f;
 		TriggerMajorBoutOfMadness();
 		OnPsychologicalCollapse.Broadcast(1);
 	}
 	else if (MentalCollapseCount == 2)
 	{
-		MaxSanityCapMultiplier = 0.50f; // Nowy limit: 50.0
+		MaxSanityCapMultiplier = 0.50f;
 		LowestSanityPercentInDarkness = 1.0f;
-		CurrentSanity = BaseMaxSanity * 0.25f; // <--- ZAWSZE RÓWNE 25.0 PKT!
+		CurrentSanity = BaseMaxSanity * 0.25f;
 		TriggerMajorBoutOfMadness();
 		OnPsychologicalCollapse.Broadcast(2);
 	}
 	else if (MentalCollapseCount >= 3)
 	{
+#if !UE_BUILD_SHIPPING
 		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("[KONIEC NOCY] Ostateczne Załamanie Psychiczne! Przebudzenie w Hubie rano."));
+#endif
 		OnTotalMentalBreakdown.Broadcast();
 	}
 
@@ -180,9 +245,8 @@ void USanityComponent::HandleSanityDepleted()
 
 void USanityComponent::EndGracePeriod()
 {
-	bIsGracePeriodActive = false; // Immunitet 10 sekund wygasł!
+	bIsGracePeriodActive = false;
 
-	// Jeśli po 10 sekundach wciąż stoisz w mroku na zerze -> KOLEJNA ZAPAŚĆ!
 	if (bIsInDarkness && CurrentSanity <= 0.0f)
 	{
 		HandleSanityDepleted();
@@ -191,7 +255,7 @@ void USanityComponent::EndGracePeriod()
 
 void USanityComponent::EndAdrenalineSurge()
 {
-	bIsAdrenalineActive = false; // Powrót do normalnego tempa 4.0 pkt/s
+	bIsAdrenalineActive = false;
 }
 
 float USanityComponent::GetCurrentDynamicComfortCap() const
@@ -207,8 +271,11 @@ void USanityComponent::TakeSanityDamage(float DamageAmount, FGameplayTag ShockTa
 	float FinalDamage = bHasMinorMadness ? (DamageAmount * MinorMadnessDrainMultiplier) : DamageAmount;
 	CurrentSanity = FMath::Clamp(CurrentSanity - FinalDamage, 0.0f, GetMaxSanity());
 
-	float CurrentSanityPercent = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
-	LowestSanityPercentInDarkness = FMath::Min(LowestSanityPercentInDarkness, CurrentSanityPercent);
+	if (!bIsGracePeriodActive)
+	{
+		float CurrentSanityPercent = CurrentSanity / FMath::Max(1.0f, GetMaxSanity());
+		LowestSanityPercentInDarkness = FMath::Min(LowestSanityPercentInDarkness, CurrentSanityPercent);
+	}
 
 	OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
 
@@ -268,7 +335,7 @@ bool USanityComponent::CheckLightLineOfSight()
 
 	FVector PlayerLocation = Player->GetActorLocation();
 	FCollisionQueryParams TraceParams;
-	TraceParams.AddIgnoredActor(Player); // Promień ignoruje gracza
+	TraceParams.AddIgnoredActor(Player);
 
 	for (USafeLightComponent* Light : OverlappingLightSources)
 	{
@@ -277,21 +344,19 @@ bool USanityComponent::CheckLightLineOfSight()
 		FVector LightLocation = Light->GetComponentLocation();
 		FHitResult Hit;
 
-		// Rzucamy promień z gracza do żarówki
 		bool bHit = GetWorld()->LineTraceSingleByChannel(
 			Hit,
 			PlayerLocation,
 			LightLocation,
-			ECC_Visibility, // Kanał kolizji. Opcjonalnie zmienisz na własny, by ignorował szkło
+			ECC_Visibility,
 			TraceParams
 		);
 
-		// Jeśli promień nie trafił w ścianę (lub trafił prosto w mebel ze światłem)
 		if (!bHit || Hit.GetActor() == Light->GetOwner())
 		{
-			return true; // Sukces! Przynajmniej jedno światło nas oświetla
+			return true;
 		}
 	}
 
-	return false; // Wszystkie światła są za ścianą!
+	return false;
 }

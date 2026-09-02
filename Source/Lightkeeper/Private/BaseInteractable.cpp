@@ -117,23 +117,79 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	// ====================================================================
 	// 3. HAŁAS DLA AI (Tylko uderzenia z prędkością >= 240 cm/s):
 	// ====================================================================
-	if (ImpactSpeed >= 55.0f && (CurrentTime - LastNoiseTime > 0.25f))
+	if (CurrentTime - LastNoiseTime > 0.20f)
 	{
-		float MassFactor = FMath::Clamp(FMath::Sqrt(ActualMass / 2.0f), 0.45f, 3.5f);
-		float CalculatedNoiseRadius = (ImpactSpeed * MassFactor) * 0.9f;
-
-		// Rejestrujemy nawet mały hałas FootKickera (od 45 cm w górę):
-		if (CalculatedNoiseRadius >= 45.0f)
+		// A. DLA DRZWI NA ZAWIASACH: Zliczamy prędkość kątową obrotu (Trzaśnięcie o framugę):
+		if (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation)
 		{
-			LastNoiseTime = CurrentTime;
+			float AngularSpeedDeg = HitComponent ? HitComponent->GetPhysicsAngularVelocityInDegrees().Size() : 0.0f;
+			float SlamSpeed = FMath::Max(ImpactSpeed, AngularSpeedDeg * 1.8f);
 
-			if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+			// Jeśli drzwi uderzyły o framugę z prędkością >= 75 cm/s:
+			if (SlamSpeed >= 75.0f)
 			{
-				static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-				FVector SoundLoc = Hit.ImpactPoint.IsNearlyZero() ? GetActorLocation() : FVector(Hit.ImpactPoint);
-				float FinalNoiseRadius = FMath::Clamp(CalculatedNoiseRadius, 45.0f, 2200.0f);
+				LastNoiseTime = CurrentTime;
 
-				Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag);
+				if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+				{
+					static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+					FVector SoundLoc = Hit.ImpactPoint.IsNearlyZero() ? GetActorLocation() : FVector(Hit.ImpactPoint);
+
+					// Wyliczamy siłę fali trzaśnięcia (od 4m do max 15m przy potężnym trzaśnięciu):
+					float MassFactor = FMath::Clamp(FMath::Sqrt(FMath::Max(1.0f, ActualMass) / 15.0f), 0.6f, 2.2f);
+					float SlamRadius = FMath::Clamp((SlamSpeed * 4.5f) * MassFactor, 400.0f, 1500.0f);
+
+					// JEDNO ZUNIFIKOWANE WYWOŁANIE (Subsystem sam pomnoży przez Materiał Drewno vs Stal!):
+					Sensory->RegisterNoise(SoundLoc, SlamRadius, NoiseTag, MaterialTag);
+
+#if !UE_BUILD_SHIPPING
+					if (GEngine)
+					{
+						GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Orange,
+							FString::Printf(TEXT("🚪 [TRZAŚNIĘCIE DRZWI] Prędkość uderzenia: %.0f cm/s | Fala: %.0f cm (%.1f m)"),
+								SlamSpeed, SlamRadius * UImSimSensorySubsystem::GetMaterialNoiseMultiplier(MaterialTag),
+								(SlamRadius * UImSimSensorySubsystem::GetMaterialNoiseMultiplier(MaterialTag)) / 100.0f));
+					}
+#endif
+				}
+				return;
+			}
+		}
+
+		// B. DLA ZWYKŁYCH RZUCANYCH PROPÓW (Skrzynie, Butelki, Kłódki):
+		if (ImpactSpeed >= 55.0f)
+		{
+			float MassFactor = FMath::Clamp(FMath::Sqrt(ActualMass / 2.0f), 0.45f, 3.5f);
+			float CalculatedNoiseRadius = (ImpactSpeed * MassFactor) * 0.9f;
+
+			if (CalculatedNoiseRadius >= 45.0f)
+			{
+				LastNoiseTime = CurrentTime;
+
+				if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+				{
+					static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+					FVector SoundLoc = Hit.ImpactPoint.IsNearlyZero() ? GetActorLocation() : FVector(Hit.ImpactPoint);
+					float FinalNoiseRadius = FMath::Clamp(CalculatedNoiseRadius, 45.0f, 2200.0f);
+
+					// 1. Materiał samego rzucanego przedmiotu:
+					FGameplayTag EffectiveMaterialTag = MaterialTag.IsValid() ? MaterialTag : ItemData.ItemTag;
+
+					// 2. NOWOŚĆ: Sprawdzamy materiał trafionego podłoża przez uniwersalny ekstraktor:
+					if (OtherActor)
+					{
+						FGameplayTag HitSurfaceTag = UImSimSensorySubsystem::ExtractMaterialTagFromActor(OtherActor);
+
+						// Jeśli uderzono w głośniejszy materiał (np. drewniana skrzynia trafia w stal) -> stal przejmuje ton:
+						if (UImSimSensorySubsystem::GetMaterialNoiseMultiplier(HitSurfaceTag) > UImSimSensorySubsystem::GetMaterialNoiseMultiplier(EffectiveMaterialTag))
+						{
+							EffectiveMaterialTag = HitSurfaceTag;
+						}
+					}
+
+					// 3. Subsystem sam przeliczy ostateczną głośność:
+					Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag, EffectiveMaterialTag);
+				}
 			}
 		}
 	}
@@ -194,12 +250,15 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 		}
 	}
 
+	//CurrentTime = GetWorld()->GetTimeSeconds();
+
 	// ====================================================================
 	// 6. UDERZENIE W POTWORA (ZADANIE OBRAŻEŃ DLA APawn):
 	// ====================================================================
 	if (APawn* HitPawn = Cast<APawn>(OtherActor))
 	{
 		if (bIsHeld) return;
+		if (CurrentTime - LastReleaseTime < 0.6f) return;
 		if (CurrentTime - LastHitTime < 0.35f) return;
 
 		// Rzucony obiekt uderza potwora z prędkością >= 250 cm/s:
@@ -276,6 +335,13 @@ void ABaseInteractable::HandleDeath()
 	{
 		TriggerStateEmission();
 		return;
+	}
+
+	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	{
+		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+		// Drewniana skrzynia = 6.5m, Szklana gablota = 11.7m, Metal = 9.7m:
+		Sensory->RegisterNoise(GetActorLocation(), 650.0f, NoiseTag, MaterialTag);
 	}
 
 	TArray<UPrimitiveComponent*> PrimComps;
@@ -747,18 +813,62 @@ void ABaseInteractable::GrabObject_Implementation(AActor* Grabber)
 	bIsHeld = true;
 }
 
-void ABaseInteractable::ReleaseObject_Implementation() { bIsHeld = false; }
+void ABaseInteractable::ReleaseObject_Implementation() 
+{ 
+	bIsHeld = false; 
+	LastReleaseTime = GetWorld()->GetTimeSeconds();
+}
 void ABaseInteractable::MoveObject_Implementation(float AxisDelta) {}
 bool ABaseInteractable::IsLocked_Implementation()
 {
+	// 1. Jeśli zamek jest bezpośrednio na tym meblu/drzwiach:
 	if (GateComp)
 	{
 		return GateComp->bIsLocked;
 	}
-	return false;
+
+	// 2. Jeśli na drzwiach wisi kłódka / łańcuch jako dziecko (ChildActor) -> pytamy kłódkę!
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors);
+	for (AActor* Attached : AttachedActors)
+	{
+		if (Attached && Attached->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+		{
+			// Ignorujemy kłódki, które spadły na ziemię (symulują fizykę):
+			TArray<UPrimitiveComponent*> AttachedPrims;
+			Attached->GetComponents<UPrimitiveComponent>(AttachedPrims);
+			bool bIsSimulating = false;
+			for (UPrimitiveComponent* P : AttachedPrims)
+			{
+				if (P && P->IsSimulatingPhysics())
+				{
+					bIsSimulating = true;
+					break;
+				}
+			}
+
+			if (bIsSimulating) continue;
+
+			// Pytamy zasuwkę / kłódkę:
+			if (IPhysicalInteract::Execute_IsLocked(Attached))
+			{
+				return true; // Zasuwka lub kłódka trzyma drzwi!
+			}
+		}
+	}
+
+	return bIsLocked;
 }
+
 void ABaseInteractable::SetLocked_Implementation(bool bNewLocked)
 {
+	bIsLocked = bNewLocked;
+
+	if (!bNewLocked)
+	{
+		//bIsLatched = false;
+	}
+
 	if (GateComp)
 	{
 		GateComp->bIsLocked = bNewLocked;
@@ -779,6 +889,11 @@ void ABaseInteractable::SlamObject_Implementation(FVector PushDirection, float P
 
 void ABaseInteractable::OnLockedInteraction_Implementation(AActor* InstigatorActor)
 {
+	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	{
+		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+		Sensory->RegisterNoise(GetActorLocation(), 300.0f, NoiseTag);
+	}
 	// TA FUNKCJA JEST WYWOŁYWANA PRZEZ [LPM].
 	// W Twoim Blueprincie (BP_BaseDoor) odpali się zdarzenie "Event OnLockedInteraction",
 	// które odtworzy Twój efekt wibracji klamki i dźwięk!
@@ -792,16 +907,21 @@ void ABaseInteractable::OnLockedInteraction_Implementation(AActor* InstigatorAct
 
 void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActor)
 {
-	ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(InstigatorActor);
-	if (!Player || !GateComp) return;
+	if (!InstigatorActor || !GateComp) return;
 
-	// 1. Zczytujemy tag z lewej ręki LPM lub prawej dłoni FPP:
+	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	{
+		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+		Sensory->RegisterNoise(GetActorLocation(), 200.0f, NoiseTag);
+	}
+
+	// 1. Zczytujemy klucz z lewej ręki LPM lub prawej dłoni FPP (Czysta Kompozycja):
 	FGameplayTag KeyTagFromHand = FGameplayTag::EmptyTag;
 	ABaseInteractable* PhysicalKeyInHand = nullptr;
 
-	if (Player->InteractionComp)
+	if (UInteractionComponent* InterComp = InstigatorActor->FindComponentByClass<UInteractionComponent>())
 	{
-		if (AActor* HeldActor = Player->InteractionComp->GetGrabbedActor())
+		if (AActor* HeldActor = InterComp->GetGrabbedActor())
 		{
 			if (ABaseInteractable* HeldProp = Cast<ABaseInteractable>(HeldActor))
 			{
@@ -811,29 +931,38 @@ void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActo
 		}
 	}
 
-	if (!KeyTagFromHand.IsValid() && Player->ToolManagerComp && Player->ToolManagerComp->CurrentEquippedTool)
+	if (!KeyTagFromHand.IsValid())
 	{
-		KeyTagFromHand = Player->ToolManagerComp->CurrentEquippedTool->ToolItemData.ItemTag;
+		if (UToolManagerComponent* ToolMgr = InstigatorActor->FindComponentByClass<UToolManagerComponent>())
+		{
+			if (ToolMgr->CurrentEquippedTool)
+			{
+				KeyTagFromHand = ToolMgr->CurrentEquippedTool->ToolItemData.ItemTag;
+			}
+		}
 	}
 
 	// ====================================================================
-	// SCENARIUSZ 1: DRZWI SĄ ZAMKNIĘTE -> PRÓBA OTWARCIA [E]:
+	// A. PRÓBA OTWARCIA Z RĘKI (Fizyczny klucz w dłoni, narzędzie FPP lub Perk):
 	// ====================================================================
 	if (GateComp->bIsLocked)
 	{
-		if (GateComp->TryUnlock(Player, KeyTagFromHand))
+		if (GateComp->TryUnlock(InstigatorActor, KeyTagFromHand))
 		{
-			bIsLatched = false;
+			//bIsLatched = false;
 
-			// Jeśli użyliśmy fizycznego klucza z lewej ręki -> Chowamy go do plecaka!
 			if (PhysicalKeyInHand)
 			{
 				PhysicalKeyInHand->CaptureItemData();
-				if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
+				if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
 				{
 					InvComp->TryAddItem(PhysicalKeyInHand->ItemData);
 				}
-				Player->InteractionComp->StopInteraction();
+
+				if (UInteractionComponent* InterComp = InstigatorActor->FindComponentByClass<UInteractionComponent>())
+				{
+					InterComp->StopInteraction();
+				}
 				PhysicalKeyInHand->Destroy();
 			}
 
@@ -842,74 +971,115 @@ void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActo
 #endif
 			return;
 		}
-		else
+
+		// Otwarcie z plecaka przy pierwszym podejściu (gdy zamek jest zaryglowany):
+		if (GateComp->RequiredKeyTag.IsValid())
 		{
-			// Odmowa dostępu na [E] -> Odpala też efekt Rattle w BP jako informację!
-			IPhysicalInteract::Execute_OnLockedInteraction(this, InstigatorActor);
-			return;
-		}
-	}
-
-	// ====================================================================
-	// SCENARIUSZ 2: DRZWI SĄ ODBLOKOWANE -> PRÓBA ZARYGLOWANIA [E]:
-	// ====================================================================
-	if (!GateComp->bIsLocked)
-	{
-		bool bRequiresClosedPosition = (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation);
-
-		if (bRequiresClosedPosition && !bIsLatched)
-		{
-#if !UE_BUILD_SHIPPING
-			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("⚠️ [ZAMEK] Musisz najpierw domknąć drzwi [LPM], by je zaryglować [E]!"));
-#endif
-			return;
-		}
-
-		// 1. Zaryglowanie pasującym kluczem z ręki (Dopasowanie + Schowanie):
-		if (GateComp->RequiredKeyTag.IsValid() && KeyTagFromHand.MatchesTagExact(GateComp->RequiredKeyTag))
-		{
-			GateComp->bIsLocked = true;
-			GateComp->bKeyDiscovered = true;
-			bIsLatched = true;
-
-			if (PhysicalKeyInHand)
-			{
-				PhysicalKeyInHand->CaptureItemData();
-				if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
-				{
-					InvComp->TryAddItem(PhysicalKeyInHand->ItemData);
-				}
-				Player->InteractionComp->StopInteraction();
-				PhysicalKeyInHand->Destroy();
-			}
-
-#if !UE_BUILD_SHIPPING
-			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Cyan, TEXT("🔒 [ZARYGLOWANO] Dopasowano i zaryglowano zamek kluczem z dłoni!"));
-#endif
-			return;
-		}
-
-		// 2. Zaryglowanie kluczem z plecaka (Dla już ODKRYTYCH zamków):
-		if (GateComp->bKeyDiscovered && GateComp->RequiredKeyTag.IsValid())
-		{
-			if (UInventoryComponent* InvComp = Player->FindComponentByClass<UInventoryComponent>())
+			if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
 			{
 				if (InvComp->HasItemWithTag(GateComp->RequiredKeyTag))
 				{
-					GateComp->bIsLocked = true;
-					bIsLatched = true;
+					GateComp->UnlockGate(FName("Key"));
+					//bIsLatched = false;
 
 #if !UE_BUILD_SHIPPING
-					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Cyan, TEXT("🔒 [ZARYGLOWANO] Zaryglowano zamek kluczem z plecaka!"));
+					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Green, TEXT("🔓 [SUKCES] Zamek otwarty kluczem z plecaka!"));
 #endif
 					return;
 				}
 			}
 		}
 	}
+
+	// ====================================================================
+	// B. ODBLOKOWANIE LUB RYGLOWANIE ZNANYM KLUCZEM Z PLECAKA (Gdy zamek na to pozwala bCanBeRelocked):
+	// ====================================================================
+	if (GateComp->bCanBeRelocked && GateComp->bKeyDiscovered && GateComp->RequiredKeyTag.IsValid())
+	{
+		if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
+		{
+			if (InvComp->HasItemWithTag(GateComp->RequiredKeyTag))
+			{
+				bool bRequiresClosedPosition = (InteractionType == EInteractionType::Hinge || InteractionType == EInteractionType::Translation);
+
+				if (bRequiresClosedPosition && !GateComp->bIsLocked && !bIsLatched)
+				{
+#if !UE_BUILD_SHIPPING
+					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Yellow, TEXT("⚠️ [ZAMEK] Musisz najpierw domknąć drzwi [LPM], by je zaryglować [E]!"));
+#endif
+					return;
+				}
+
+				GateComp->bIsLocked = !GateComp->bIsLocked;
+				bIsLatched = GateComp->bIsLocked;
+
+#if !UE_BUILD_SHIPPING
+				FString StateStr = GateComp->bIsLocked ? TEXT("🔒 ZARYGLOWANO") : TEXT("🔓 OTWARTO");
+				FColor MsgColor = GateComp->bIsLocked ? FColor::Red : FColor::Cyan;
+				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, MsgColor, FString::Printf(TEXT("%s drzwi kluczem z plecaka!"), *StateStr));
+#endif
+				return;
+			}
+		}
+	}
+
+	// ====================================================================
+	// C. JEŚLI ZAMEK NADAL TRZYMA (BRAK KLUCZA / NIEZNANY ZAMEK) -> RATTLE:
+	// ====================================================================
+	if (GateComp->bIsLocked)
+	{
+		IPhysicalInteract::Execute_OnLockedInteraction(this, InstigatorActor);
+	}
 }
 
 bool ABaseInteractable::IsSmallProp_Implementation()
 {
 	return PropSizeTag.MatchesTagExact(FGameplayTag::RequestGameplayTag(FName("Prop.Size.Small")));
+}
+
+void ABaseInteractable::FillContainerWithLiquid(FGameplayTag LiquidElementTag, float Purity)
+{
+	static const FGameplayTag OilTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Moisture.Oil"), false);
+	static const FGameplayTag AcidTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Moisture.Acid"), false);
+	static const FGameplayTag BloodTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Moisture.Blood"), false);
+	static const FGameplayTag WaterTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Moisture.Water"), false);
+
+	// 1. Zapisujemy parametry wybuchu przy rzucie (OnImpact):
+	ItemData.bIsStateEmitter = true;
+	ItemData.TriggerType = EEmissionTrigger::OnImpact;
+	ItemData.EmittedStateTag = LiquidElementTag;
+	ItemData.EmissionShape = EEmissionShape::CylinderDisc; // Rozlana plama cieczy
+	ItemData.SplashRadius = 250.0f;
+	MaterialPurity = Purity;
+
+	// 2. Automatycznie dopasowujemy Tag i Nazwę przedmiotu w ekwipunku:
+	if (LiquidElementTag.MatchesTag(OilTag))
+	{
+		ItemData.ItemTag = FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Oil"), false);
+		ItemData.ItemName = FText::FromString(TEXT("Butelka Nafty (Paliwo / Płomień)"));
+	}
+	else if (LiquidElementTag.MatchesTag(AcidTag))
+	{
+		ItemData.ItemTag = FGameplayTag::RequestGameplayTag(FName("Item.Throwable.AcidFlask"), false);
+		ItemData.ItemName = FText::FromString(TEXT("Fiolka ze Żrącym Kwasem"));
+	}
+	else if (LiquidElementTag.MatchesTag(BloodTag))
+	{
+		ItemData.ItemTag = FGameplayTag::RequestGameplayTag(FName("Item.Throwable.BaitBloodJar"), false);
+		ItemData.ItemName = FText::FromString(TEXT("Słoik z Krwią (Przynęta na Psy)"));
+	}
+	else if (LiquidElementTag.MatchesTag(WaterTag))
+	{
+		ItemData.ItemTag = FGameplayTag::RequestGameplayTag(FName("Item.Consumable.Water"), false);
+		ItemData.ItemName = (Purity >= 0.8f) ? FText::FromString(TEXT("Czysta Woda Pitna")) : FText::FromString(TEXT("Mętna Woda ze Ścieków"));
+	}
+
+#if !UE_BUILD_SHIPPING
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Green,
+			FString::Printf(TEXT("🧪 [%s] Napełniono naczynie: %s (Czystość: %.0f%%)!"),
+				*GetName(), *ItemData.ItemName.ToString(), Purity * 100.0f));
+	}
+#endif
 }

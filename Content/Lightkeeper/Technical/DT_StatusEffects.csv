@@ -2,6 +2,7 @@
 Status.State.Hazard.Electrocuted,"(TagName=""Status.State.Hazard.Electrocuted"")","Porażenie Prądem (STUN)",1.5,true,0.0,8.0,0.5,false
 Status.Injury.Minor.Bleeding,"(TagName=""Status.Injury.Minor.Bleeding"")","Krwawienie",30.0,false,1.0,1.0,3.0,true
 Status.Debuff.Slowed,"(TagName=""Status.Debuff.Slowed"")","Spowolnienie (Błoto / Woda)",5.0,false,0.60,0.0,0.0,false
+Status.Debuff.Stunned,"(TagName=""Status.Debuff.Stunned"")","Ogłuszenie Fizyczne",1.5,true,0.0,0.0,0.0,false
 Status.State.Neutral.Oiled,"(TagName=""Status.State.Neutral.Oiled"")","Zaolejony (Katalizator Ognia)",15.0,false,0.90,0.0,0.0,false
 Status.State.Neutral.Wet,"(TagName=""Status.State.Neutral.Wet"")","Mokry (Przewodzi Prąd)",20.0,false,1.0,0.0,0.0,false
 Status.State.Hazard.Burning,"(TagName=""Status.State.Hazard.Burning"")","Płonięcie",8.0,false,1.0,10.0,1.0,false

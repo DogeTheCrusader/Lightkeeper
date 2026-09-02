@@ -66,7 +66,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
 	void ZoomHoldSlot(float ScrollDelta); // Przybliżanie/oddalanie kółkiem myszy
 
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
 	float CalculateMovementSpeed(float BaseSpeed, float MassInKg) const;
+
+	//UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
+	//void OnGrabbedComponentHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit);
 
 	// ====================================================================
 	// 3. RZUCANIE I PĘD FIZYCZNY (Charged Throw & Slam)
@@ -175,7 +179,12 @@ private:
 
 	float ObstacleLagTimer = 0.0f;
 
+	float LastManipulationNoiseTime = 0.0f;
+
 	void CleanupInteraction();
 	APlayerCameraManager* GetCameraManager();
 	void UpdateCrosshairState(EInteractionType HeldType, bool bIsHoldingObject);
+
+	float HeldPropBurnExposureTimer = 0.0f;
+	void ProcessHeldObjectHazardConduction(float DeltaTime);
 };

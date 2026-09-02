@@ -36,7 +36,27 @@ protected:
 	virtual void BeginPlay() override;
 
 private:
+	FVector LastKnownTargetLocation = FVector::ZeroVector;
+	float ChaseLostTime = 0.0f;
+	float DetectionBuildUpTimer = 0.0f;
+
+	int32 RecentFlashCount = 0;
+	float LastFlashTimestamp = 0.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Lightkeeper|Sensory Profile")
+	float ChaseMemoryDuration = 3.5f;
+
+	float DetectionTelegraphTimer = 0.0f;
+	bool bIsTelegraphingAggro = false;
+
+	int32 RecentNoiseCount = 0;
+	float LastNoiseTimestamp = 0.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Lightkeeper|Sensory Profile", meta = (ToolTip = "Liczba hałasów z bliska (np. 3), która wymusza natychmiastowe dostrojenie i szarżę na gracza."))
+	int32 NoiseSaturationThreshold = 3;
+
 	void EvaluateSensoryStimuli();
-	bool CheckLineOfSightToPlayer(class ALightkeeperCharacter* Player) const;
+	bool CheckLineOfSightToTarget(AActor* TargetActor) const;
 	bool CheckAcousticOcclusion(FVector SoundOrigin) const;
+	bool IsTargetLookingAtMe(APawn* TargetPawn) const;
 };

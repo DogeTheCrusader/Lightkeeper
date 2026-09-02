@@ -1,13 +1,15 @@
 ﻿#include "StaminaComponent.h"
-#include "LightkeeperCharacter.h"
 #include "ProgressionComponent.h"
 #include "HealthComponent.h"
 #include "InteractionComponent.h"
 #include "InventoryComponent.h"
-#include "ImSimSensorySubsystem.h"
 #include "StatusEffectComponent.h"
+#include "ReactionReceiverComponent.h"
+#include "ImSimSensorySubsystem.h"
+#include "Components/CapsuleComponent.h"  
 #include "Components/PrimitiveComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Character.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 
@@ -27,15 +29,24 @@ void UStaminaComponent::BeginPlay()
 
 float UStaminaComponent::GetEffectiveMaxStamina() const
 {
-	float EffectiveMax = MaxStamina;
-	if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
+	float VigorBonus = 0.0f;
+	AActor* Owner = GetOwner();
+	if (!Owner) return MaxStamina;
+
+	// 1. PULL API Z PROGRESJI WIGORU (Czysta Kompozycja):
+	if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
 	{
-		if (UHealthComponent* HealthComp = OwnerChar->FindComponentByClass<UHealthComponent>())
-		{
-			// Mnożnik pobierany czysto z ciała (Pęknięte żebra = 0.5x):
-			EffectiveMax *= HealthComp->GetMaxStaminaMultiplier();
-		}
+		VigorBonus = ProgComp->GetMaxHealthBonus();
 	}
+
+	float EffectiveMax = MaxStamina + VigorBonus;
+
+	// 2. PULL API Z URAZÓW KLATKI (Pęknięte żebra = -50% staminy):
+	if (UHealthComponent* HealthComp = Owner->FindComponentByClass<UHealthComponent>())
+	{
+		EffectiveMax *= HealthComp->GetMaxStaminaMultiplier();
+	}
+
 	return EffectiveMax;
 }
 
@@ -43,8 +54,12 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
-	UHealthComponent* HealthComp = OwnerChar ? OwnerChar->FindComponentByClass<UHealthComponent>() : nullptr;
+	AActor* Owner = GetOwner();
+	if (!Owner) return;
+
+	UHealthComponent* HealthComp = Owner->FindComponentByClass<UHealthComponent>();
+	UCharacterMovementComponent* MoveComp = Owner->FindComponentByClass<UCharacterMovementComponent>();
+	ACharacter* OwnerChar = Cast<ACharacter>(Owner);
 
 	float EffectiveMaxStamina = GetEffectiveMaxStamina();
 	Stamina = FMath::Clamp(Stamina, 0.0f, EffectiveMaxStamina);
@@ -54,13 +69,94 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		StopSprint();
 	}
 
-	// 1. ZDARZENIE NISKIEJ STAMINY (HealthComponent sam decyduje o bólu i arytmii!):
+	// 1. ZDARZENIE NISKIEJ STAMINY (Ból i arytmia w HealthComp):
 	if (Stamina <= (EffectiveMaxStamina * LowStaminaThresholdPercent))
 	{
 		OnLowStaminaTick.Broadcast(DeltaTime);
 	}
 
-	// 2. ZLICZANIE ZUŻYCIA:
+	// 2. SIATKA AKUSTYCZNA KROKÓW DLA AI (Działa w ruchu niezależnie od drenażu staminy!):
+	if (MoveComp && !MoveComp->IsFalling())
+	{
+		float Speed2D = Owner->GetVelocity().Size2D();
+
+		if (Speed2D > 30.0f)
+		{
+			FootstepNoiseTimer += DeltaTime;
+
+			UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>();
+			bool bIsPlayerCrouched = (OwnerChar && OwnerChar->bIsCrouched) ||
+				MoveComp->IsCrouching() ||
+				(Capsule && Capsule->GetScaledCapsuleHalfHeight() < 70.0f);
+
+			// Weryfikacja głośnego podłoża (Metal / Szkło / Woda):
+			FHitResult FloorHit = MoveComp->CurrentFloor.HitResult;
+			FGameplayTag FloorMaterialTag;
+
+			if (FloorHit.bBlockingHit && FloorHit.GetActor())
+			{
+				AActor* FloorActor = FloorHit.GetActor();
+
+				if (FloorActor->ActorHasTag(FName("Material.Glass")))
+				{
+					FloorMaterialTag = FGameplayTag::RequestGameplayTag(FName("Material.Glass"), false);
+				}
+				else if (FloorActor->ActorHasTag(FName("Material.Metal")))
+				{
+					FloorMaterialTag = FGameplayTag::RequestGameplayTag(FName("Material.Metal"), false);
+				}
+				else if (FloorActor->ActorHasTag(FName("State.Element.Moisture.Water")) || FloorActor->ActorHasTag(FName("Material.Water")))
+				{
+					FloorMaterialTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Moisture.Water"), false);
+				}
+			}
+
+			// Dobieramy interwał i głośność:
+			float StepInterval = 0.55f;
+			float BaseNoiseRadius = 220.0f; // Chód: 2.2m
+
+			if (bIsSprinting)
+			{
+				StepInterval = 0.35f;
+				BaseNoiseRadius = 650.0f; // Sprint: 6.5m
+			}
+			else if (bIsPlayerCrouched)
+			{
+				StepInterval = 0.70f;
+				// Gwarantowane 0 cm na zwykłej podłodze, 140 cm na głośnej:
+				BaseNoiseRadius = FloorMaterialTag.IsValid() ? 140.0f : 0.0f;
+			}
+
+			if (FootstepNoiseTimer >= StepInterval)
+			{
+				FootstepNoiseTimer = 0.0f;
+
+				if (BaseNoiseRadius > 0.0f)
+				{
+					// PULL API Z PRECYZJI:
+					float StealthMod = 1.0f;
+					if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+					{
+						StealthMod = ProgComp->GetStealthNoiseMultiplier();
+					}
+
+					float FinalFootstepRadius = BaseNoiseRadius * StealthMod;
+
+					if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+					{
+						static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+						Sensory->RegisterNoise(Owner->GetActorLocation(), FinalFootstepRadius, NoiseTag, FloorMaterialTag);
+					}
+				}
+			}
+		}
+		else
+		{
+			FootstepNoiseTimer = 0.0f;
+		}
+	}
+
+	// 3. ZLICZANIE DRENAŻU STAMINY:
 	float SprintDrain = bIsSprinting ? DrainRate : 0.0f;
 	float CarryDrain = GetCarryingStaminaDrain();
 	float TotalDrainPerSecond = SprintDrain + CarryDrain;
@@ -70,7 +166,12 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		TotalDrainPerSecond *= HealthComp->GetStaminaDrainMultiplier();
 	}
 
-	// 3. FAZA WYSIŁKU:
+	if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+	{
+		TotalDrainPerSecond *= ProgComp->GetStaminaCostReductionMultiplier();
+	}
+
+	// 4. FAZA WYSIŁKU:
 	if (TotalDrainPerSecond > 0.0f)
 	{
 		RestTimer = 0.0f;
@@ -79,21 +180,6 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 		if (bIsSprinting)
 		{
 			OnSprintTick.Broadcast(DeltaTime);
-			FootstepNoiseTimer += DeltaTime;
-			if (FootstepNoiseTimer >= 0.32f)
-			{
-				FootstepNoiseTimer = 0.0f;
-
-				if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
-				{
-					static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-					Sensory->RegisterNoise(GetOwner()->GetActorLocation(), 450.0f, NoiseTag);
-				}
-			}
-		}
-		else
-		{
-			FootstepNoiseTimer = 0.0f;
 		}
 
 		Stamina = FMath::Clamp(Stamina - (TotalDrainPerSecond * DeltaTime), 0.0f, EffectiveMaxStamina);
@@ -109,9 +195,9 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 			OnExhaustionTriggered.Broadcast();
 			StopSprint();
 
-			if (CarryDrain > 0.0f && OwnerChar)
+			if (CarryDrain > 0.0f)
 			{
-				if (UInteractionComponent* InterComp = OwnerChar->FindComponentByClass<UInteractionComponent>())
+				if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
 				{
 					InterComp->StopInteraction();
 					OnForcedDropDueToFatigue.Broadcast();
@@ -119,12 +205,11 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 			}
 		}
 	}
-	// 4. FAZA REGENERACJI:
+	// 5. FAZA REGENERACJI:
 	else if (Stamina < EffectiveMaxStamina)
 	{
 		RestTimer += DeltaTime;
 
-		// Czas na Drugi Oddech (HealthComponent wydłuża go przy obitych żebrach):
 		float RequiredRestTime = RestTimeToTriggerRush * (HealthComp ? HealthComp->GetStaminaDrainMultiplier() : 1.0f);
 
 		if (bIsFatigued && RestTimer >= RequiredRestTime && !bSecondWindActive)
@@ -154,18 +239,21 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 
 bool UStaminaComponent::CanSprint() const
 {
-	ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
-	if (!OwnerChar) return false;
+	AActor* Owner = GetOwner();
+	if (!Owner) return false;
 
-	if (!OwnerChar->CanPerformAction(EPlayerAction::Sprint)) return false;
-
-	static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
-	if (OwnerChar->StatusComp && OwnerChar->StatusComp->HasStatusEffect(GuardTag))
+	// Blokada biegu w trakcie trzymania gardy:
+	if (UStatusEffectComponent* StatusComp = Owner->FindComponentByClass<UStatusEffectComponent>())
 	{
-		return false; // Nie można biegać w trakcie trzymania bloku!
+		static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
+		if (StatusComp->HasStatusEffect(GuardTag))
+		{
+			return false;
+		}
 	}
 
-	if (UInteractionComponent* InterComp = OwnerChar->FindComponentByClass<UInteractionComponent>())
+	// Blokada biegu z ciężkimi przedmiotami (> 15kg):
+	if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
 	{
 		if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
 		{
@@ -177,6 +265,25 @@ bool UStaminaComponent::CanSprint() const
 	}
 
 	return (Stamina > 0.5f);
+}
+
+bool UStaminaComponent::TryConsumeJumpStamina()
+{
+	float FinalCost = JumpStaminaCost;
+	AActor* Owner = GetOwner();
+	if (!Owner) return TryConsumeStamina(FinalCost);
+
+	// Wigor redukuje koszt staminy za skok (PULL API):
+	if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+	{
+		FinalCost *= ProgComp->GetStaminaCostReductionMultiplier();
+	}
+	if (UHealthComponent* HealthComp = Owner->FindComponentByClass<UHealthComponent>())
+	{
+		FinalCost *= HealthComp->GetStaminaDrainMultiplier();
+	}
+
+	return TryConsumeStamina(FinalCost);
 }
 
 bool UStaminaComponent::TryConsumeStamina(float Amount)
@@ -215,32 +322,19 @@ void UStaminaComponent::StartSprint()
 {
 	bWantsToSprint = true;
 
-	ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner());
-	if (!OwnerChar || !OwnerChar->GetCharacterMovement()) return;
+	AActor* Owner = GetOwner();
+	if (!Owner) return;
 
-	if (OwnerChar->GetCharacterMovement()->IsFalling()) return;
+	UCharacterMovementComponent* MoveComp = Owner->FindComponentByClass<UCharacterMovementComponent>();
+	if (MoveComp && MoveComp->IsFalling()) return;
 
-	if (CanSprint())
-	{
-		bIsSprinting = true;
-		OwnerChar->UpdateMovementSpeed();
-	}
-	else
-	{
-		bIsSprinting = false;
-		OwnerChar->UpdateMovementSpeed();
-	}
+	bIsSprinting = CanSprint();
 }
 
 void UStaminaComponent::StopSprint()
 {
 	bWantsToSprint = false;
 	bIsSprinting = false;
-
-	if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
-	{
-		OwnerChar->UpdateMovementSpeed();
-	}
 }
 
 void UStaminaComponent::HandleLanded()
@@ -248,10 +342,6 @@ void UStaminaComponent::HandleLanded()
 	if (bWantsToSprint && CanSprint())
 	{
 		bIsSprinting = true;
-		if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
-		{
-			OwnerChar->UpdateMovementSpeed();
-		}
 	}
 }
 
@@ -288,56 +378,43 @@ float UStaminaComponent::CalculateCurrentRegenRate() const
 
 float UStaminaComponent::GetCarryingStaminaDrain() const
 {
-	if (AActor* Owner = GetOwner())
+	AActor* Owner = GetOwner();
+	if (!Owner) return 0.0f;
+
+	if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
 	{
-		if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
+		if (AActor* GrabbedActor = InterComp->GetGrabbedActor())
 		{
-			if (AActor* GrabbedActor = InterComp->GetGrabbedActor())
+			if (IPhysicalInteract::Execute_GetInteractionType(GrabbedActor) == EInteractionType::Grab_Free)
 			{
-				EInteractionType HeldType = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
-				if (HeldType == EInteractionType::Grab_Free)
+				if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
 				{
-					if (UPrimitiveComponent* HeldMesh = InterComp->GetGrabbedComponent())
+					if (HeldMesh->IsSimulatingPhysics())
 					{
-						if (HeldMesh->IsSimulatingPhysics())
+						float Mass = HeldMesh->GetMass();
+
+						if (Mass <= 20.0f) return 0.0f;
+
+						float ExcessMass = Mass - 20.0f;
+						float MassAddedDrain = FMath::Clamp(FMath::Sqrt(ExcessMass) * 0.22f, 0.0f, 3.2f);
+						float BaseDrain = 2.0f + MassAddedDrain;
+
+						// PULL API Z WIGORU:
+						if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
 						{
-							float Mass = HeldMesh->GetMass();
-							if (Mass > HeavyCarryMassThreshold)
-							{
-								// ====================================================================
-								// 1. GRACZ Z WIGOREM: NIESIE CIĘŻKIE PRZEDMIOTY ZA DARMO!
-								// ====================================================================
-								if (ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(Owner))
-								{
-									static const FGameplayTag HeavyLifterTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.HeavyLifter"), false);
-									static const FGameplayTag IronSpineTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.IronSpine"), false);
+							static const FGameplayTag IronSpineTag = FGameplayTag::RequestGameplayTag(FName("Perk.Vigor.1B"), false);
+							if (ProgComp->HasPerk(IronSpineTag)) return 0.0f;
 
-									if (Player->ProgressionComp && (Player->ProgressionComp->HasPerk(HeavyLifterTag) || Player->ProgressionComp->HasPerk(IronSpineTag)))
-									{
-										// Zdrowy siłacz niesie barykadę bez żadnego drenażu staminy w marszu:
-										return 0.0f;
-									}
-								}
-
-								// ====================================================================
-								// 2. BEZ PERKA: TWARDY LIMIT DRENAŻU (Max 5.0 pkt/s zamiast 120 pkt/s!)
-								// ====================================================================
-								float ExcessMass = Mass - HeavyCarryMassThreshold;
-								float BaseDrain = FMath::Clamp(ExcessMass * 0.04f, 1.5f, 5.0f);
-
-								// ====================================================================
-								// 3. SUROWOŚĆ SURVIVAL HORRORU: URAZY CIAŁA PODWAJAJĄ DRENAŻ!
-								// (Zwichnięty bark = x1.8 drenażu, Pęknięte żebra = x1.25 drenażu)
-								// ====================================================================
-								if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
-								{
-									BaseDrain *= Health->GetMouseResistanceMultiplier();
-									BaseDrain *= Health->GetStaminaDrainMultiplier();
-								}
-
-								return BaseDrain;
-							}
+							if (ProgComp->CanLiftHeavyProps()) BaseDrain *= 0.5f;
 						}
+
+						// PULL API Z URAZÓW CIAŁA:
+						if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+						{
+							BaseDrain *= Health->GetStaminaDrainMultiplier();
+						}
+
+						return BaseDrain;
 					}
 				}
 			}
@@ -365,16 +442,11 @@ float UStaminaComponent::GetEncumbranceSpeedMultiplier() const
 							float Mass = HeldMesh->GetMass();
 							float MassPenalty = FMath::Clamp(Mass * 0.02f, 0.0f, 0.5f);
 
-							// ====================================================================
-							// BONUS WIGORU: Każdy Tier Wigoru redukuje karę spowolnienia o 35%!
-							// ====================================================================
-							if (ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(Owner))
+							// PULL API Z WIGORU:
+							if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
 							{
-								if (Player->ProgressionComp)
-								{
-									int32 VigorTier = Player->ProgressionComp->GetStatTier(ECharacterStat::Vigor);
-									MassPenalty *= FMath::Clamp(1.0f - (VigorTier * 0.35f), 0.1f, 1.0f);
-								}
+								int32 VigorTier = ProgComp->GetStatTier(ECharacterStat::Vigor);
+								MassPenalty *= FMath::Clamp(1.0f - (VigorTier * 0.35f), 0.1f, 1.0f);
 							}
 
 							Multiplier -= MassPenalty;

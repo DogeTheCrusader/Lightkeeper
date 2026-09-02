@@ -92,4 +92,10 @@ public:
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Lightkeeper|Interaction")
 	void TryUnlockFromInput(AActor* InstigatorActor);
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "PhysicalInteract")
+	FGameplayTag GetMaterialTag();
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "PhysicalInteract")
+	float GetMaterialPurity();
 };

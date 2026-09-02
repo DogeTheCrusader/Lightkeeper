@@ -1,5 +1,6 @@
 ﻿#include "StatusEffectComponent.h"
 #include "HealthComponent.h"
+#include "ImSimSensorySubsystem.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/World.h"
@@ -15,19 +16,16 @@ void UStatusEffectComponent::BeginPlay()
 {
 	Super::BeginPlay();
 	bIsStunned = false;
-	bIsBleeding = false;
 	CurrentSpeedMultiplier = 1.0f;
 	ActiveStatusTags.Reset();
+	ActiveStatusInstances.Empty();
 }
 
 void UStatusEffectComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().ClearTimer(StunTimerHandle);
-		World->GetTimerManager().ClearTimer(SlowTimerHandle);
-		World->GetTimerManager().ClearTimer(BleedTimerHandle);
-		World->GetTimerManager().ClearTimer(BleedDurationTimerHandle);
+		World->GetTimerManager().ClearTimer(MasterHeartbeatTimerHandle);
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -41,197 +39,261 @@ const FStatusEffectDataRow* UStatusEffectComponent::FindStatusEffectRow(const FG
 	return StatusEffectDataTable->FindRow<FStatusEffectDataRow>(RowName, ContextString);
 }
 
-void UStatusEffectComponent::ApplyStatusEffectFromTable(FGameplayTag StatusTag, float CustomDuration)
+void UStatusEffectComponent::ApplyStatusEffectFromTable(FGameplayTag StatusTag, float CustomDuration, float CustomDamagePerTick, float CustomTickInterval)
 {
 	if (!StatusTag.IsValid() || ImmuneStatusTags.HasTag(StatusTag)) return;
 
 	const FStatusEffectDataRow* Row = FindStatusEffectRow(StatusTag);
 	float Duration = (CustomDuration >= 0.0f) ? CustomDuration : (Row ? Row->DefaultDuration : 10.0f);
 
-	// 1. Dodajemy tag do aktywnych:
-	AddStatusEffect(StatusTag, Duration);
+	if (Row && Row->bIsStun && bImmuneToStun) return;
 
-	if (Row)
+	// Jeśli status już trwa -> odnawiamy czas:
+	for (FActiveStatusInstance& Instance : ActiveStatusInstances)
 	{
-		// 2. Jeśli status to STUN:
-		if (Row->bIsStun)
+		if (Instance.StatusTag.MatchesTagExact(StatusTag))
 		{
-			ApplyStun(Duration);
+			if (Duration > 0.0f)
+			{
+				Instance.RemainingDuration = FMath::Max(Instance.RemainingDuration, Duration);
+				Instance.bIsTimed = true;
+			}
+			if (CustomDamagePerTick > 0.0f) Instance.DamagePerTick = CustomDamagePerTick;
+			if (CustomTickInterval > 0.0f) Instance.TickInterval = CustomTickInterval;
+			return;
+		}
+	}
+
+	static const FGameplayTag ElectrocutedHazard = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
+	bool bIsPurePhysicalStun = (Row && Row->bIsStun && !StatusTag.MatchesTag(ElectrocutedHazard));
+
+	FActiveStatusInstance NewInstance;
+	NewInstance.StatusTag = StatusTag;
+	NewInstance.RemainingDuration = Duration;
+	NewInstance.bIsTimed = (Duration > 0.0f);
+	NewInstance.DamagePerTick = (CustomDamagePerTick > 0.0f) ? CustomDamagePerTick : (Row ? Row->DamagePerTick : 0.0f);
+	NewInstance.TickInterval = (CustomTickInterval > 0.0f) ? CustomTickInterval : (Row ? FMath::Max(0.1f, Row->TickInterval) : 1.0f);
+	NewInstance.TimeUntilNextTick = NewInstance.TickInterval;
+	NewInstance.bIsStun = bIsPurePhysicalStun;
+	NewInstance.SpeedMultiplier = StatusTag.MatchesTag(ElectrocutedHazard) ? 0.40f : (Row ? Row->SpeedMultiplier : 1.0f);
+	NewInstance.bSpawnsBloodScent = Row ? Row->bSpawnsBloodScent : false;
+
+	ActiveStatusInstances.Add(NewInstance);
+	ActiveStatusTags.AddTag(StatusTag);
+	OnStatusEffectAdded.Broadcast(StatusTag);
+
+	// ====================================================================
+	// FAZA 1: POCZĄTKOWY SZOK PRĄDEM (NATYCHMIASTOWY STUN NA 1.5s!):
+	// ====================================================================
+	if (StatusTag.MatchesTag(ElectrocutedHazard))
+	{
+		ApplyStun(0.5f); // Pierwsze uderzenie paraliżuje na 1.5 sekundy!
+	}
+
+	UpdateAggregatedStates();
+
+	if (UWorld* World = GetWorld())
+	{
+		if (!World->GetTimerManager().IsTimerActive(MasterHeartbeatTimerHandle))
+		{
+			World->GetTimerManager().SetTimer(MasterHeartbeatTimerHandle, this, &UStatusEffectComponent::ProcessMasterHeartbeat, 0.25f, true);
+		}
+	}
+}
+
+void UStatusEffectComponent::ProcessMasterHeartbeat()
+{
+	const float DeltaStep = 0.25f;
+	AActor* Owner = GetOwner();
+	UHealthComponent* HealthComp = Owner ? Owner->FindComponentByClass<UHealthComponent>() : nullptr;
+
+	for (int32 i = ActiveStatusInstances.Num() - 1; i >= 0; --i)
+	{
+		FActiveStatusInstance& Instance = ActiveStatusInstances[i];
+
+		if (Instance.bIsTimed)
+		{
+			Instance.RemainingDuration -= DeltaStep;
 		}
 
-		// 3. Jeśli status to SPOWOLNIENIE:
-		if (Row->SpeedMultiplier < 1.0f)
+		Instance.TimeUntilNextTick -= DeltaStep;
+
+		// ====================================================================
+		// WYKONANIE TICKA DOT (OBRAŻENIA CO INTERWAŁ):
+		// ====================================================================
+		if (Instance.TimeUntilNextTick <= 0.0f)
 		{
-			ApplySlow(Row->SpeedMultiplier, Duration);
+			Instance.TimeUntilNextTick = Instance.TickInterval;
+
+			// 1. Obrażenia elektryczne:
+			if (Instance.DamagePerTick > 0.0f && HealthComp && !HealthComp->IsDead())
+			{
+				HealthComp->TakeDamage(Instance.DamagePerTick, Instance.StatusTag);
+			}
+
+			// ====================================================================
+			// FAZA 2: WYRAŹNY MIKRO-STUN CO IMPULS (SZARPNIĘCIE NA 0.22s):
+			// Kasujemy pęd i zamrażamy postać na 0.22s przy każdym uderzeniu 8 HP!
+			// ====================================================================
+			static const FGameplayTag ElectroTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
+			if (Instance.StatusTag.MatchesTag(ElectroTag))
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Owner))
+				{
+					if (Char->GetCharacterMovement())
+					{
+						Char->GetCharacterMovement()->Velocity = FVector::ZeroVector;
+					}
+				}
+
+				// Jeśli postać skończyła już początkowy stun 1.5s -> aplikujemy wyraźny impuls 0.22s:
+				if (!bIsStunned)
+				{
+					ApplyStun(0.35f);
+				}
+			}
+
+			// 3. Emisja zapachu krwi:
+			if (Instance.bSpawnsBloodScent && Owner)
+			{
+				if (UImSimSensorySubsystem* SensorySubsystem = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+				{
+					static const FGameplayTag BloodScentTag = FGameplayTag::RequestGameplayTag(FName("Scent.Type.Blood"), false);
+					FVector ScentLocation = Owner->GetActorLocation() - FVector(0.0f, 0.0f, 80.0f);
+					SensorySubsystem->RegisterScent(ScentLocation, 2500.0f, BloodScentTag, 15.0f);
+				}
+				OnBloodDropSpawned.Broadcast(Owner->GetActorLocation());
+			}
 		}
 
-		// 4. Jeśli status zadaje DoT (np. Krwawienie):
-		if (Row->DamagePerTick > 0.0f)
+		// WYGAŚNIĘCIE STATUSU:
+		if (Instance.bIsTimed && Instance.RemainingDuration <= 0.0f)
 		{
-			ApplyBleed(Duration, Row->DamagePerTick, Row->TickInterval);
+			FGameplayTag ExpiredTag = Instance.StatusTag;
+			ActiveStatusInstances.RemoveAt(i);
+			ActiveStatusTags.RemoveTag(ExpiredTag);
+			OnStatusEffectRemoved.Broadcast(ExpiredTag);
+		}
+	}
+
+	UpdateAggregatedStates();
+
+	if (ActiveStatusInstances.IsEmpty())
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(MasterHeartbeatTimerHandle);
 		}
 	}
 }
 
 void UStatusEffectComponent::AddStatusEffect(FGameplayTag StatusTag, float Duration)
 {
-	if (!StatusTag.IsValid() || ImmuneStatusTags.HasTag(StatusTag) || ActiveStatusTags.HasTag(StatusTag)) return;
+	ApplyStatusEffectFromTable(StatusTag, Duration);
+}
 
-	ActiveStatusTags.AddTag(StatusTag);
-	OnStatusEffectAdded.Broadcast(StatusTag);
+void UStatusEffectComponent::UpdateAggregatedStates()
+{
+	bool bAnyStun = false;
+	float SlowestSpeed = 1.0f;
 
-	if (Duration > 0.0f)
+	for (const FActiveStatusInstance& Instance : ActiveStatusInstances)
 	{
-		if (UWorld* World = GetWorld())
+		if (Instance.bIsStun) bAnyStun = true;
+		// Zabezpieczenie: Mnożnik prędkości nie może być zerem:
+		if (Instance.SpeedMultiplier < SlowestSpeed && Instance.SpeedMultiplier > 0.05f)
 		{
-			FTimerHandle TagTimer;
-			World->GetTimerManager().SetTimer(TagTimer, [this, StatusTag]()
-				{
-					RemoveStatusEffect(StatusTag);
-				}, Duration, false);
+			SlowestSpeed = Instance.SpeedMultiplier;
 		}
 	}
+
+	bIsStunned = bAnyStun;
+
+	// ====================================================================
+	// ODBLOKOWANIE RUCHU POSTACI (Gwarantowane przywrócenie MOVE_Walking!):
+	// ====================================================================
+	if (ACharacter* Char = Cast<ACharacter>(GetOwner()))
+	{
+		if (Char->GetCharacterMovement())
+		{
+			if (bIsStunned)
+			{
+				Char->GetCharacterMovement()->DisableMovement();
+			}
+			else if (Char->GetCharacterMovement()->MovementMode == MOVE_None)
+			{
+				// Natychmiast przywracamy normalne chodzenie pod [W]!
+				Char->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+			}
+		}
+	}
+
+	// Minimalna prędkość to zawsze co najmniej 10% (nigdy 0!):
+	CurrentSpeedMultiplier = FMath::Clamp(SlowestSpeed, 0.1f, 1.0f);
+	OnStunStateChanged.Broadcast(bIsStunned);
 }
 
 void UStatusEffectComponent::RemoveStatusEffect(FGameplayTag StatusTag)
 {
-	if (!StatusTag.IsValid() || !ActiveStatusTags.HasTag(StatusTag)) return;
-
-	ActiveStatusTags.RemoveTag(StatusTag);
-	OnStatusEffectRemoved.Broadcast(StatusTag);
+	for (int32 i = ActiveStatusInstances.Num() - 1; i >= 0; --i)
+	{
+		if (ActiveStatusInstances[i].StatusTag.MatchesTagExact(StatusTag))
+		{
+			ActiveStatusInstances.RemoveAt(i);
+			ActiveStatusTags.RemoveTag(StatusTag);
+			OnStatusEffectRemoved.Broadcast(StatusTag);
+			break;
+		}
+	}
+	UpdateAggregatedStates();
 }
 
 void UStatusEffectComponent::ClearAllStatusEffects()
 {
+	ActiveStatusInstances.Empty();
 	ActiveStatusTags.Reset();
-	StopBleed();
-	EndStun();
-	EndSlow();
+	UpdateAggregatedStates();
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(MasterHeartbeatTimerHandle);
+	}
 }
 
-void UStatusEffectComponent::ApplyStun(float Duration)
+void UStatusEffectComponent::ApplyStun(float CustomDuration)
 {
-	if (bImmuneToStun || Duration <= 0.0f) return;
+	if (bImmuneToStun) return;
 
-	static const FGameplayTag StunTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
+	static const FGameplayTag StunTag = FGameplayTag::RequestGameplayTag(FName("Status.Debuff.Stunned"), false);
 	if (ImmuneStatusTags.HasTag(StunTag)) return;
 
-	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
-	if (!OwnerChar || !OwnerChar->GetCharacterMovement()) return;
+	// Domyślny bezpieczny czas stuna (1.5s jeśli brak wpisu w tabeli):
+	float FinalDuration = (CustomDuration > 0.0f) ? CustomDuration : 1.5f;
 
-	bIsStunned = true;
-	OwnerChar->GetCharacterMovement()->DisableMovement();
-	OnStunStateChanged.Broadcast(true);
-
-#if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Purple,
-			FString::Printf(TEXT("⚡ [STUN] %s został SPARALIŻOWANY na %.1fs!"), *OwnerChar->GetName(), Duration));
-	}
-#endif
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(StunTimerHandle);
-		World->GetTimerManager().SetTimer(StunTimerHandle, this, &UStatusEffectComponent::EndStun, Duration, false);
-	}
+	ApplyStatusEffectFromTable(StunTag, FinalDuration);
 }
 
-void UStatusEffectComponent::EndStun()
-{
-	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
-	if (!OwnerChar || !OwnerChar->GetCharacterMovement()) return;
-
-	bIsStunned = false;
-	OwnerChar->GetCharacterMovement()->SetMovementMode(MOVE_Walking);
-	OnStunStateChanged.Broadcast(false);
-}
-
-void UStatusEffectComponent::ApplyBleed(float Duration, float DamagePerTick, float TickInterval)
+void UStatusEffectComponent::ApplyBleed(float CustomDuration, float CustomDamagePerTick, float CustomTickInterval)
 {
 	static const FGameplayTag BleedTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Bleeding"), false);
-	if (ImmuneStatusTags.HasTag(BleedTag)) return;
-
-	bIsBleeding = true;
-	BleedDamageTick = DamagePerTick;
-	AddStatusEffect(BleedTag, Duration);
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(BleedTimerHandle);
-		World->GetTimerManager().ClearTimer(BleedDurationTimerHandle);
-
-		World->GetTimerManager().SetTimer(BleedTimerHandle, this, &UStatusEffectComponent::ProcessBleedTick, TickInterval, true, 1.0f);
-
-		if (Duration > 0.0f)
-		{
-			World->GetTimerManager().SetTimer(BleedDurationTimerHandle, this, &UStatusEffectComponent::StopBleed, Duration, false);
-		}
-	}
+	ApplyStatusEffectFromTable(BleedTag, CustomDuration, CustomDamagePerTick, CustomTickInterval);
 }
 
-void UStatusEffectComponent::ProcessBleedTick()
+
+void UStatusEffectComponent::ApplySlow(float CustomSpeedMultiplier, float CustomDuration)
 {
-	AActor* Owner = GetOwner();
-	if (!Owner) return;
-
-	UHealthComponent* HealthComp = Owner->FindComponentByClass<UHealthComponent>();
-	if (!HealthComp || HealthComp->IsDead() || !bIsBleeding)
-	{
-		StopBleed();
-		return;
-	}
-
-	static const FGameplayTag BleedTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Bleeding"), false);
-	HealthComp->TakeDamage(BleedDamageTick, BleedTag);
-
-	OnBloodDropSpawned.Broadcast(Owner->GetActorLocation());
-
-#if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor(255, 50, 50),
-			FString::Printf(TEXT("🩸 [KRWAWIENIE] %s traci krew (-%.1f HP)!"), *Owner->GetName(), BleedDamageTick));
-	}
-#endif
+	static const FGameplayTag SlowTag = FGameplayTag::RequestGameplayTag(FName("Status.Debuff.Slowed"), false);
+	ApplyStatusEffectFromTable(SlowTag, CustomDuration);
 }
 
 void UStatusEffectComponent::StopBleed()
 {
-	bIsBleeding = false;
 	static const FGameplayTag BleedTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Bleeding"), false);
 	RemoveStatusEffect(BleedTag);
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(BleedTimerHandle);
-		World->GetTimerManager().ClearTimer(BleedDurationTimerHandle);
-	}
 }
 
-void UStatusEffectComponent::ApplySlow(float SpeedMultiplier, float Duration)
+bool UStatusEffectComponent::IsBleeding() const
 {
-	if (Duration <= 0.0f) return;
-
-	CurrentSpeedMultiplier = FMath::Clamp(SpeedMultiplier, 0.1f, 1.0f);
-
-	// AUTOMATYCZNIE NAKŁADAMY TAG SPOWOLNIENIA:
-	static const FGameplayTag SlowTag = FGameplayTag::RequestGameplayTag(FName("Status.Debuff.Slowed"), false);
-	AddStatusEffect(SlowTag, Duration);
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(SlowTimerHandle);
-		World->GetTimerManager().SetTimer(SlowTimerHandle, this, &UStatusEffectComponent::EndSlow, Duration, false);
-	}
-}
-
-void UStatusEffectComponent::EndSlow()
-{
-	CurrentSpeedMultiplier = 1.0f;
-
-	// ZDEJMUJEMY TAG PO UPŁYWIE CZASU:
-	static const FGameplayTag SlowTag = FGameplayTag::RequestGameplayTag(FName("Status.Debuff.Slowed"), false);
-	RemoveStatusEffect(SlowTag);
+	static const FGameplayTag BleedTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Bleeding"), false);
+	return HasStatusEffect(BleedTag);
 }

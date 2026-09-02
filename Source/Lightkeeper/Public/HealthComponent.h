@@ -276,7 +276,7 @@ public:
 	void ClearAllMinorInjuries();
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Health")
-	float GetMaxHealth() const { return BaseMaxHealth * MaxHealthCapMultiplier; }
+	float GetMaxHealth() const;
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Health")
 	bool IsDead() const { return CurrentHealth <= 0.0f; }
@@ -293,6 +293,9 @@ protected:
 
 	UFUNCTION()
 	void HandleOwnerLowStaminaTick(float DeltaTime);
+
+	UPROPERTY()
+	TObjectPtr<class UProgressionComponent> CachedProgComp;
 
 private:
 	FTimerHandle PalliativeTimerHandle;

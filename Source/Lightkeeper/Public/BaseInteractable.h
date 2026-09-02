@@ -54,6 +54,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
 	FGameplayTag MaterialTag;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MaterialPurity = 1.0f;
+
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Physics")
 	float CalculateMovementResistance(UPrimitiveComponent* MovingComponent);
 
@@ -123,6 +126,9 @@ public:
 
 	virtual void EndPersistentZone();
 
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Chemistry")
+	void FillContainerWithLiquid(FGameplayTag LiquidElementTag, float Purity = 1.0f);
+
 protected:
 	UFUNCTION()
 	virtual void HandleDeath();
@@ -136,6 +142,9 @@ protected:
 	FTimerHandle ZoneExpiryTimerHandle;
 	FTimerHandle ContinuousTimerHandle;
 	FTimerHandle FuseTimerHandle;
+	float LastReleaseTime = 0.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Door")
+	bool bIsLocked = false;
 
 private:
 	float LastHitTime = 0.0f;
@@ -163,4 +172,6 @@ public:
 	virtual void PickupObject_Implementation(AActor* InstigatorActor) override;
 	virtual bool ConsumeObject_Implementation(AActor* InstigatorActor) override;
 	virtual void TryUnlockFromInput_Implementation(AActor* InstigatorActor) override;
+	virtual FGameplayTag GetMaterialTag_Implementation() override { return MaterialTag; }
+	virtual float GetMaterialPurity_Implementation() override { return MaterialPurity; }
 };

@@ -5,12 +5,11 @@
 #include "GameplayTagContainer.h"
 #include "SanityComponent.generated.h"
 
-// Delegaty dla UI, dźwięków, drżenia kamery i efektów szaleństwa
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSanityChanged, float, CurrentSanity, float, MaxSanity);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMinorMadnessTriggered, FGameplayTag, MadnessTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBoutOfMadnessTriggered, FGameplayTag, BoutTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPsychologicalCollapse, int32, CollapseCount);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTotalMentalBreakdown); // 3. zapaść - Koniec Nocy!
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTotalMentalBreakdown);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class LIGHTKEEPER_API USanityComponent : public UActorComponent
@@ -31,23 +30,18 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	float CurrentSanity = 100.0f;
 
-	// Mnożnik limitu Sanity po zapaściach (1.0 -> 0.75 -> 0.50)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	float MaxSanityCapMultiplier = 1.0f;
 
-	// Spokojna prędkość regeneracji w świetle podczas normalnej gry (4.0 pkt/s):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float BaseLightRecoveryRate = 3.0f;
 
-	// Błyskawiczny zryw adrenaliny po wejściu w światło po zapaści (14.0 pkt/s):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float AdrenalineRecoveryRate = 14.0f;
 
-	// Czas trwania zrywu adrenaliny (6 sekund):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float AdrenalineDuration = 6.0f;
 
-	// Dynamiczny sufit – ile % ponad najgłębszą panikę leczy światło (+30%):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float PassiveRecoveryWindowPercent = 0.30f;
 
@@ -55,16 +49,16 @@ public:
 	float LowestSanityPercentInDarkness = 1.0f;
 
 	// ==========================================================
-	// 2. MROK I SANKTUARIA (Wykrywanie Światła)
+	// 2. MROK, SANKTUARIA I SPOJRZENIE NA POTWORY
 	// ==========================================================
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
-	int32 ActiveLightSourcesCount = 0; // 0 = Mrok, >0 = Bezpieczne światło
+	int32 ActiveLightSourcesCount = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
-	int32 SanctuaryZonesCount = 0; // >0 = Bezpieczny Pokój (Safe Room)
+	int32 SanctuaryZonesCount = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
-	bool bIsInDarkness = true; // Startujemy w mroku
+	bool bIsInDarkness = true;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	float TimeInDarkness = 0.0f;
@@ -74,6 +68,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float DarknessAccelerationFactor = 0.08f;
+
+	// Spojrzenie na potwora (Gaze Dread):
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
+	bool bIsLookingAtMonster = false;
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
 	void RegisterPotentialLight(class USafeLightComponent* LightComp);
@@ -85,9 +83,8 @@ public:
 	const TArray<class USafeLightComponent*>& GetOverlappingLightSources() const { return OverlappingLightSources; }
 
 	// ==========================================================
-	// 3. SZALEŃSTWO, GRACE PERIOD I FAIL FORWARD
+	// 3. SZALEŃSTWO I FAIL FORWARD
 	// ==========================================================
-	// Pancerz ochronny po zapaści (10 sekund absolutnego immunitetu na kolejny Bout w mroku!):
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float GracePeriodDuration = 10.0f;
 
@@ -97,16 +94,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float MinorMadnessDrainMultiplier = 1.5f;
 
-	// Licznik psychicznych zapaści w danej nocy (1, 2, 3 -> Koniec Nocy)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	int32 MentalCollapseCount = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	FGameplayTagContainer ActiveMadnessTags;
 
-	// ==========================================================
-	// 4. EVENTY I FUNKCJE OBSŁUGI
-	// ==========================================================
+	// Delegaty:
 	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Sanity")
 	FOnSanityChanged OnSanityChanged;
 
@@ -122,22 +116,18 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Sanity")
 	FOnTotalMentalBreakdown OnTotalMentalBreakdown;
 
-	// Szok psychiczny (spojrzenie na potwora)
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
-	void TakeSanityDamage(float DamageAmount, FGameplayTag ShockTag);
+	void TakeSanityDamage(float DamageAmount, FGameplayTag ShockTag = FGameplayTag());
 
-	// Leki (Wino Mariani / Sole) - leczą ponad limit i resetują traumę
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
 	void RestoreSanity(float RestoreAmount);
 
-	// Źródła światła (Latarnia na pasie, latarnie miejskie):
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
 	void AddLightSource();
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
 	void RemoveLightSource();
 
-	// Bezpieczne pokoje (Sanctuary):
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sanity")
 	void EnterSanctuary() { SanctuaryZonesCount++; }
 
@@ -168,8 +158,8 @@ protected:
 	UPROPERTY()
 	TArray<class USafeLightComponent*> OverlappingLightSources;
 
-	// Główna funkcja weryfikująca czy światło jest zasłonięte
 	bool CheckLightLineOfSight();
+	void EvaluateMonsterGazeDread(float DeltaTime);
 
 private:
 	void HandleSanityDepleted();

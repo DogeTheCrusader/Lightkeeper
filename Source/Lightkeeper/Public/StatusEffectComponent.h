@@ -37,7 +37,40 @@ struct FStatusEffectDataRow : public FTableRowBase
 	bool bSpawnsBloodScent = false;
 };
 
-// 2. DELEGATY
+// Struktura instancji w pamięci RAM:
+USTRUCT()
+struct FActiveStatusInstance
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FGameplayTag StatusTag;
+
+	UPROPERTY()
+	float RemainingDuration = 0.0f;
+
+	UPROPERTY()
+	bool bIsTimed = false;
+
+	UPROPERTY()
+	float TimeUntilNextTick = 0.0f;
+
+	UPROPERTY()
+	float DamagePerTick = 0.0f;
+
+	UPROPERTY()
+	float TickInterval = 1.0f;
+
+	UPROPERTY()
+	bool bIsStun = false;
+
+	UPROPERTY()
+	float SpeedMultiplier = 1.0f;
+
+	UPROPERTY()
+	bool bSpawnsBloodScent = false;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStatusEffectAdded, FGameplayTag, StatusTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStatusEffectRemoved, FGameplayTag, StatusTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStunStateChanged, bool, bIsStunned);
@@ -51,15 +84,9 @@ class LIGHTKEEPER_API UStatusEffectComponent : public UActorComponent
 public:
 	UStatusEffectComponent();
 
-	// ==========================================================
-	// 1. DATA TABLE STATUSÓW
-	// ==========================================================
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Lightkeeper|Database")
 	TObjectPtr<UDataTable> StatusEffectDataTable;
 
-	// ==========================================================
-	// 2. DANE STANU I IMMUNITETY
-	// ==========================================================
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Status Effects")
 	FGameplayTagContainer ActiveStatusTags;
 
@@ -70,10 +97,10 @@ public:
 	FGameplayTagContainer ImmuneStatusTags;
 
 	// ==========================================================
-	// 3. METODY GŁÓWNE
+	// GŁÓWNE PUBLICZNE METODY DLA CAŁEJ GRY:
 	// ==========================================================
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
-	void ApplyStatusEffectFromTable(FGameplayTag StatusTag, float CustomDuration = -1.0f);
+	void ApplyStatusEffectFromTable(FGameplayTag StatusTag, float CustomDuration = -1.0f, float CustomDamagePerTick = -1.0f, float CustomTickInterval = -1.0f);
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
 	void AddStatusEffect(FGameplayTag StatusTag, float Duration = 0.0f);
@@ -88,16 +115,17 @@ public:
 	void ClearAllStatusEffects();
 
 	// ==========================================================
-	// 4. KONTROLA CIAŁA (STUN, BLEED, SLOW)
+	// HELPERY DLA WALKI I MEDYCYNY:
 	// ==========================================================
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
-	void ApplyStun(float Duration);
+	void ApplyStun(float CustomDuration = 0.0f);
+
+	// Helper krwawienia z opcjonalnymi parametrami:
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
+	void ApplyBleed(float CustomDuration = 0.0f, float CustomDamagePerTick = 0.0f, float CustomTickInterval = 0.0f);
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
-	void ApplySlow(float SpeedMultiplier, float Duration);
-
-	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
-	void ApplyBleed(float Duration = 15.0f, float DamagePerTick = 1.0f, float TickInterval = 3.0f);
+	void ApplySlow(float CustomSpeedMultiplier = 0.0f, float CustomDuration = 0.0f);
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Status Effects")
 	void StopBleed();
@@ -106,14 +134,12 @@ public:
 	bool IsStunned() const { return bIsStunned; }
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Status Effects")
-	bool IsBleeding() const { return bIsBleeding; }
+	bool IsBleeding() const;
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Status Effects")
 	float GetCurrentSpeedMultiplier() const { return CurrentSpeedMultiplier; }
 
-	// ==========================================================
-	// 5. DELEGATY ASSIGNABLE
-	// ==========================================================
+	// Delegaty
 	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Status Effects")
 	FOnStatusEffectAdded OnStatusEffectAdded;
 
@@ -135,21 +161,15 @@ private:
 	bool bIsStunned = false;
 
 	UPROPERTY(VisibleAnywhere, Category = "Lightkeeper|Status Effects")
-	bool bIsBleeding = false;
-
-	UPROPERTY(VisibleAnywhere, Category = "Lightkeeper|Status Effects")
 	float CurrentSpeedMultiplier = 1.0f;
 
-	FTimerHandle StunTimerHandle;
-	FTimerHandle SlowTimerHandle;
-	FTimerHandle BleedTimerHandle;
-	FTimerHandle BleedDurationTimerHandle;
+	UPROPERTY()
+	TArray<FActiveStatusInstance> ActiveStatusInstances;
 
-	float BleedDamageTick = 1.0f;
+	FTimerHandle MasterHeartbeatTimerHandle;
 
-	void EndStun();
-	void EndSlow();
-	void ProcessBleedTick();
+	void ProcessMasterHeartbeat();
+	void UpdateAggregatedStates();
 
 	const FStatusEffectDataRow* FindStatusEffectRow(const FGameplayTag& StatusTag) const;
 };

@@ -2,7 +2,6 @@
 #include "HealthComponent.h"
 #include "StatusEffectComponent.h"
 #include "BaseInteractable.h"
-#include "GameFramework/Character.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
@@ -10,6 +9,12 @@
 UReactionReceiverComponent::UReactionReceiverComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+
+	static ConstructorHelpers::FObjectFinder<UDataTable> StatusTableFinder(TEXT("/Game/Lightkeeper/Technical/DT_StatusEffects"));
+	if (StatusTableFinder.Succeeded())
+	{
+		StatusEffectsDataTable = StatusTableFinder.Object;
+	}
 }
 
 void UReactionReceiverComponent::BeginPlay()
@@ -18,7 +23,6 @@ void UReactionReceiverComponent::BeginPlay()
 	InitializeReactionRules();
 	StateExposureTimers.Empty();
 
-	// ZNAJDUJEMY KOMPONENTY DOKŁADNIE RAZ PRZY STARCIE:
 	if (AActor* Owner = GetOwner())
 	{
 		CachedHealthComp = Owner->FindComponentByClass<UHealthComponent>();
@@ -33,6 +37,32 @@ void UReactionReceiverComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
 		World->GetTimerManager().ClearTimer(DoTTimerHandle);
 	}
 	Super::EndPlay(EndPlayReason);
+}
+
+const FStatusEffectDataRow* UReactionReceiverComponent::FindStatusEffectRow(const FGameplayTag& StatusTag) const
+{
+	if (!StatusEffectsDataTable || !StatusTag.IsValid()) return nullptr;
+
+	const FName RowName = StatusTag.GetTagName();
+	static const FString ContextString(TEXT("ReactionReceiverStatusLookup"));
+
+	if (const FStatusEffectDataRow* FastRow = StatusEffectsDataTable->FindRow<FStatusEffectDataRow>(RowName, ContextString))
+	{
+		return FastRow;
+	}
+
+	TArray<FStatusEffectDataRow*> AllRows;
+	StatusEffectsDataTable->GetAllRows<FStatusEffectDataRow>(ContextString, AllRows);
+
+	for (const FStatusEffectDataRow* Row : AllRows)
+	{
+		if (Row && StatusTag.MatchesTag(Row->StatusTag))
+		{
+			return Row;
+		}
+	}
+
+	return nullptr;
 }
 
 void UReactionReceiverComponent::InitializeReactionRules()
@@ -53,9 +83,6 @@ void UReactionReceiverComponent::InitializeReactionRules()
 	FGameplayTag TagMetal = FGameplayTag::RequestGameplayTag(FName("Material.Metal"));
 	FGameplayTag TagFlesh = FGameplayTag::RequestGameplayTag(FName("Material.Flesh"));
 
-	// ====================================================================
-	// AUTONOMICZNA TABLICA REGUŁ CHEMICZNYCH:
-	// ====================================================================
 	// 1. Woda gasi ogień:
 	ReactionRules.Add({ TagWater, TagBurning, TagBurning, TagWet, FGameplayTag(), false });
 
@@ -68,7 +95,7 @@ void UReactionReceiverComponent::InitializeReactionRules()
 	// 4. Prąd ZAWSZE poraża Ciało (Flesh) i postacie:
 	ReactionRules.Add({ TagElectricity, FGameplayTag(), FGameplayTag(), TagElectrocuted, TagFlesh, false });
 
-	// 5. Prąd naelektryzowuje mokry obiekt (dowolny materiał):
+	// 5. Prąd naelektryzowuje mokry obiekt:
 	ReactionRules.Add({ TagElectricity, TagWet, FGameplayTag(), TagElectrocuted, FGameplayTag(), false });
 
 	// 6. Prąd przewodzi przez metal:
@@ -82,32 +109,34 @@ void UReactionReceiverComponent::InitializeReactionRules()
 bool UReactionReceiverComponent::EvaluateReactionMatrix(const FGameplayTag& IncomingState, float Intensity, const FGameplayTag& OwnerMaterial)
 {
 	ABaseInteractable* OwnerInteractable = Cast<ABaseInteractable>(GetOwner());
-	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 
 	static const FGameplayTag TagElectrocuted = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
 	static const FGameplayTag TagElectricity = FGameplayTag::RequestGameplayTag(FName("State.Element.Electricity"), false);
 
-	// GWARANTOWANE PORAŻENIE DLA DOWOLNEJ POSTACI (GRACZ / POTWORY):
-	if (IncomingState.MatchesTag(TagElectricity) && OwnerChar)
+	// ====================================================================
+	// 1. GWARANTOWANE PORAŻENIE PRĄDEM DLA POSTACI:
+	// Przekazujemy do StatusEffectComponent (Zczytuje Stun i DoT z DT_StatusEffects!)
+	// ====================================================================
+	if (IncomingState.MatchesTag(TagElectricity) && CachedStatusComp)
 	{
 		ActiveStates.AddTag(TagElectrocuted);
 		OnStateApplied.Broadcast(TagElectrocuted, Intensity);
 
-		if (UStatusEffectComponent* StatusComp = OwnerChar->FindComponentByClass<UStatusEffectComponent>())
-		{
-			StatusComp->ApplyStun(0.45f); // Mikro-stun!
-		}
+		CachedStatusComp->ApplyStatusEffectFromTable(TagElectrocuted);
 
-		if (UHealthComponent* HealthComp = OwnerChar->FindComponentByClass<UHealthComponent>())
+		if (CachedHealthComp)
 		{
 			static const FGameplayTag ArrhythmiaTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Arrhythmia"), false);
-			HealthComp->AddInjury(ArrhythmiaTag, EAnatomicalLimb::Chest);
+			CachedHealthComp->AddInjury(ArrhythmiaTag, EAnatomicalLimb::Chest);
 		}
 
 		CheckAndManageDoTTimer();
 		return true;
 	}
 
+	// ====================================================================
+	// 2. REGUŁY REAKCJI CHEMICZNYCH:
+	// ====================================================================
 	for (const FChemicalReactionRule& Rule : ReactionRules)
 	{
 		if (IncomingState.MatchesTag(Rule.IncomingElement))
@@ -127,12 +156,10 @@ bool UReactionReceiverComponent::EvaluateReactionMatrix(const FGameplayTag& Inco
 					ActiveStates.AddTag(Rule.StateToAdd);
 					OnStateApplied.Broadcast(Rule.StateToAdd, Intensity);
 
-					if (Rule.StateToAdd.MatchesTag(TagElectrocuted))
+					// Przekazujemy nowy stan do StatusEffectComponent (jeśli obiekt to postać/potwór):
+					if (CachedStatusComp)
 					{
-						if (UStatusEffectComponent* StatusComp = GetOwner()->FindComponentByClass<UStatusEffectComponent>())
-						{
-							StatusComp->ApplyStun(0.45f);
-						}
+						CachedStatusComp->ApplyStatusEffectFromTable(Rule.StateToAdd);
 					}
 				}
 
@@ -155,7 +182,6 @@ void UReactionReceiverComponent::ApplyStateImpact(FGameplayTag IncomingState, fl
 	if (!IncomingState.IsValid()) return;
 
 	ABaseInteractable* OwnerInteractable = Cast<ABaseInteractable>(GetOwner());
-	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 	FGameplayTag OwnerMaterial = OwnerInteractable ? OwnerInteractable->MaterialTag : FGameplayTag();
 
 	static const FGameplayTag FireTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Thermal.Fire"), false);
@@ -179,10 +205,16 @@ void UReactionReceiverComponent::ApplyStateImpact(FGameplayTag IncomingState, fl
 			return;
 		}
 
-		if (OwnerChar || OwnerMaterial.MatchesTag(WoodTag) || OwnerMaterial.MatchesTag(TagFlesh) || IsVulnerableTo(FireTag))
+		if (CachedStatusComp || OwnerMaterial.MatchesTag(WoodTag) || OwnerMaterial.MatchesTag(TagFlesh) || IsVulnerableTo(FireTag))
 		{
 			ActiveStates.AddTag(BurningStatus);
 			OnStateApplied.Broadcast(BurningStatus, Intensity);
+
+			if (CachedStatusComp)
+			{
+				CachedStatusComp->ApplyStatusEffectFromTable(BurningStatus);
+			}
+
 			CheckAndManageDoTTimer();
 			return;
 		}
@@ -202,7 +234,7 @@ void UReactionReceiverComponent::RemoveState(FGameplayTag StateTag)
 	if (ActiveStates.HasTag(StateTag))
 	{
 		ActiveStates.RemoveTag(StateTag);
-		StateExposureTimers.Remove(StateTag); // Automatyczny reset licznika ekspozycji!
+		StateExposureTimers.Remove(StateTag);
 		OnStateRemoved.Broadcast(StateTag);
 		CheckAndManageDoTTimer();
 	}
@@ -225,7 +257,8 @@ void UReactionReceiverComponent::CheckAndManageDoTTimer()
 
 	bool bNeedsTimer = HasState(BurningStatus) || HasState(CorrodingStatus) || HasState(ElectrocutedStatus);
 
-	if (bNeedsTimer)
+	// Timer w ReactionReceiver działa TYLKO dla obiektów bez StatusEffectComponent (np. płonąca drewniana skrzynia w świecie):
+	if (bNeedsTimer && !CachedStatusComp && CachedHealthComp)
 	{
 		if (UWorld* World = GetWorld())
 		{
@@ -246,11 +279,7 @@ void UReactionReceiverComponent::CheckAndManageDoTTimer()
 
 void UReactionReceiverComponent::ProcessDoTTick()
 {
-	AActor* Owner = GetOwner();
-	if (!Owner) return;
-
-	UHealthComponent* HealthComp = Owner->FindComponentByClass<UHealthComponent>();
-	if (!HealthComp || HealthComp->IsDead())
+	if (!CachedHealthComp || CachedHealthComp->IsDead())
 	{
 		if (UWorld* World = GetWorld())
 		{
@@ -260,46 +289,26 @@ void UReactionReceiverComponent::ProcessDoTTick()
 	}
 
 	static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
-	static const FGameplayTag CorrodingStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Corroding"), false);
-	static const FGameplayTag ElectrocutedStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
-	static const FGameplayTag WetStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Neutral.Wet"), false);
-
 	TArray<FGameplayTag> StatesToAutoRemove;
 
-	// ====================================================================
-	// AUTOMATYCZNY ZEGAR EKSPOZYCJI I WYGASZANIA STANÓW (Z UŻYCIEM TMAP):
-	// ====================================================================
 	for (const FGameplayTag& ActiveTag : ActiveStates)
 	{
 		float& TimeExposed = StateExposureTimers.FindOrAdd(ActiveTag);
 		TimeExposed += 1.0f;
 
-		// 1. PRĄD: Samoczynnie gaśnie po 2.0s:
-		if (ActiveTag.MatchesTag(ElectrocutedStatus) && TimeExposed >= 2.0f)
+		// Samoczynne wygaszenie ognia dla niezniszczalnych ścian (np. po 8s):
+		if (ActiveTag.MatchesTag(BurningStatus) && AutoExtinguishDuration > 0.0f && TimeExposed >= AutoExtinguishDuration)
 		{
 			StatesToAutoRemove.Add(ActiveTag);
 		}
 
-		// 2. OGIEŃ: Po 5s nakłada Poparzenia (Burns), a po 8s gaśnie (dla ścian):
-		if (ActiveTag.MatchesTag(BurningStatus))
+		// Obrażenia zadawane obiektom ze wspólnej tabeli DT_StatusEffects:
+		if (const FStatusEffectDataRow* Row = FindStatusEffectRow(ActiveTag))
 		{
-			if (TimeExposed >= 5.0f)
+			if (Row->DamagePerTick > 0.0f)
 			{
-				static const FGameplayTag BurnsTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.Burns"), false);
-				HealthComp->AddInjury(BurnsTag, EAnatomicalLimb::None);
+				CachedHealthComp->TakeDamage(Row->DamagePerTick, ActiveTag);
 			}
-
-			if (AutoExtinguishDuration > 0.0f && TimeExposed >= AutoExtinguishDuration)
-			{
-				StatesToAutoRemove.Add(ActiveTag);
-			}
-		}
-
-		// 3. ŚCIEKI: Po 45s -> Stopa Okopowa:
-		if (ActiveTag.MatchesTag(WetStatus) && TimeExposed >= 45.0f)
-		{
-			static const FGameplayTag TrenchFootTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Minor.TrenchFoot"), false);
-			HealthComp->AddInjury(TrenchFootTag, EAnatomicalLimb::Legs);
 		}
 	}
 
@@ -308,31 +317,12 @@ void UReactionReceiverComponent::ProcessDoTTick()
 		RemoveState(ExpiredTag);
 	}
 
-	// ====================================================================
-	// NALICZANIE OBRAŻEŃ (DoT):
-	// ====================================================================
+	// Propagacja ognia przez emiter wybuchu/strefy mebla:
 	if (HasState(BurningStatus))
 	{
-		HealthComp->TakeDamage(BurnDamagePerSecond, BurningStatus);
-
-		if (ABaseInteractable* InterProp = Cast<ABaseInteractable>(Owner))
+		if (ABaseInteractable* InterProp = Cast<ABaseInteractable>(GetOwner()))
 		{
 			InterProp->TriggerStateEmission();
-		}
-	}
-
-	if (HasState(CorrodingStatus))
-	{
-		HealthComp->TakeDamage(AcidDamagePerSecond, CorrodingStatus);
-	}
-
-	if (HasState(ElectrocutedStatus))
-	{
-		HealthComp->TakeDamage(ShockDamagePerSecond, ElectrocutedStatus);
-
-		if (UStatusEffectComponent* StatusComp = Owner->FindComponentByClass<UStatusEffectComponent>())
-		{
-			StatusComp->ApplyStun(0.45f); // Szarpnięcie mięśni co sekundę!
 		}
 	}
 }

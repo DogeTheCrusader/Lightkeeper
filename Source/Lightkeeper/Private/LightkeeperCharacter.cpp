@@ -12,6 +12,7 @@
 #include "ToolManagerComponent.h"
 #include "UtilityManagerComponent.h"
 #include "LanternComponent.h"
+#include "ImSimSensorySubsystem.h"
 
 ALightkeeperCharacter::ALightkeeperCharacter()
 {
@@ -54,13 +55,25 @@ ALightkeeperCharacter::ALightkeeperCharacter()
 	if (HealthComp)
 	{
 		HealthComp->bCanReceiveInjuries = true; // Gracz jako jedyny otrzymuje urazy kości!
-		HealthComp->BaseMaxHealth = 100.0f;
 	}
 }
 
 void ALightkeeperCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// ====================================================================
+	// SYNCHRONIZACJA PASKÓW Z PROGRESJĄ RPG NA STARCIE GRY:
+	// ====================================================================
+	if (HealthComp)
+	{
+		HealthComp->CurrentHealth = HealthComp->GetMaxHealth(); // Napełnia do pełnych 125/150 HP!
+	}
+
+	if (StaminaComp)
+	{
+		StaminaComp->Stamina = StaminaComp->GetEffectiveMaxStamina(); // Napełnia staminę do powiększonego limitu!
+	}
 
 #if !UE_BUILD_SHIPPING
 	// Auto-aplikacja urazu startowego z panelu Details:
@@ -82,6 +95,11 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 
 	// Płynna aktualizacje prędkości co klatkę (działa zawsze i wszędzie!):
 	UpdateMovementSpeed();
+
+	if (LandingRecoveryTimer > 0.0f)
+	{
+		LandingRecoveryTimer -= DeltaTime;
+	}
 
 #if !UE_BUILD_SHIPPING
 	if (GEngine)
@@ -186,65 +204,129 @@ void ALightkeeperCharacter::ForwardMouseLook(float MouseX, float MouseY)
 	AddControllerPitchInput(MouseY * CameraSensitivity);
 }
 
+void ALightkeeperCharacter::Jump()
+{
+	// 1. ANTY-BUNNYHOP: Sprawdzamy czy gracz ma siłę na skok:
+	if (StaminaComp)
+	{
+		if (!StaminaComp->TryConsumeJumpStamina())
+		{
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Yellow, TEXT("⚠️ [ZADYSZKA] Zbyt mało staminy na skok!"));
+#endif
+			return; // Brak staminy -> blokada skoku!
+		}
+	}
+
+	// 2. Skok z bonusem Precyzji:
+	if (GetCharacterMovement())
+	{
+		float JumpMultiplier = ProgressionComp ? ProgressionComp->GetJumpBonusMultiplier() : 1.0f;
+		GetCharacterMovement()->JumpZVelocity = 420.0f * JumpMultiplier;
+	}
+
+	Super::Jump();
+
+	float StealthMod = ProgressionComp ? ProgressionComp->GetStealthNoiseMultiplier() : 1.0f;
+	float JumpNoise = (bIsCrouched ? 120.0f : 280.0f) * StealthMod;
+
+	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	{
+		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+		Sensory->RegisterNoise(GetActorLocation(), JumpNoise, NoiseTag);
+	}
+}
+
 void ALightkeeperCharacter::Landed(const FHitResult& Hit)
 {
 	Super::Landed(Hit);
 
-	// Pobieramy prędkość spadania w momencie uderzenia o ziemię
 	float FallSpeed = FMath::Abs(GetVelocity().Z);
-
-	// Wysyłamy Hit ORAZ FallSpeed!
 	OnCharacterLanded.Broadcast(Hit, FallSpeed);
 
 	if (StaminaComp)
 	{
 		StaminaComp->HandleLanded();
 	}
-	else
+
+	// 3. AMORTYZACJA LĄDOWANIA (0.35s powrotu do pełnego sprintu):
+	LandingRecoveryTimer = 0.35f;
+
+	if (FallSpeed > 200.0f)
 	{
-		UpdateMovementSpeed();
+		float LandingNoiseRadius = FMath::Clamp(FallSpeed * 1.35f, 350.0f, 1600.0f);
+
+		if (Hit.bBlockingHit && Hit.GetActor())
+		{
+			AActor* FloorActor = Hit.GetActor();
+			if (FloorActor->ActorHasTag(FName("Material.Metal")) || FloorActor->ActorHasTag(FName("Material.Glass")))
+			{
+				LandingNoiseRadius *= 1.4f;
+			}
+		}
+
+		if (bIsCrouched)
+		{
+			LandingNoiseRadius *= 0.5f;
+		}
+
+		float StealthMod = ProgressionComp ? ProgressionComp->GetStealthNoiseMultiplier() : 1.0f;
+		LandingNoiseRadius *= StealthMod;
+
+		if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+		{
+			static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+			Sensory->RegisterNoise(GetActorLocation(), LandingNoiseRadius, NoiseTag);
+		}
 	}
+
+	UpdateMovementSpeed();
 }
 
 void ALightkeeperCharacter::UpdateMovementSpeed()
 {
 	if (!GetCharacterMovement() || !GetCapsuleComponent()) return;
 
-	float TargetSpeed = WalkSpeed; // Domyślnie 300 cm/s
+	float GeneralAgilityMod = ProgressionComp ? ProgressionComp->GetGeneralMovementSpeedMultiplier() : 1.0f;
+	float CrouchMod = ProgressionComp ? ProgressionComp->GetCrouchSpeedMultiplier() : 1.0f;
+
+	float TargetSpeed = WalkSpeed * GeneralAgilityMod;
 
 	if (StaminaComp && StaminaComp->bIsSprinting)
 	{
-		TargetSpeed = SprintSpeed; // Domyślnie 600 cm/s
+		TargetSpeed = SprintSpeed * GeneralAgilityMod;
 
-		// ZŁAMANA NOGA: Przytrzymanie Shift daje wyraźny sprint 420 cm/s (kosztem utraty 2 HP/s!):
 		if (HealthComp)
 		{
-			static const FGameplayTag MajorLegsTag = FGameplayTag::RequestGameplayTag(FName("Status.Injury.Major.Legs"), false);
-			if (HealthComp->HasActiveInjury(MajorLegsTag))
+			float SprintCap = HealthComp->GetSprintSpeedCap();
+			if (SprintCap > 0.0f)
 			{
-				TargetSpeed = 420.0f; // Szybciej od chodu (300), ale wolniej od zdrowego sprintu (600)
+				TargetSpeed = FMath::Min(TargetSpeed, SprintCap);
 			}
 		}
 	}
 	else if (GetCapsuleComponent()->GetScaledCapsuleHalfHeight() < 70.0f)
 	{
-		TargetSpeed = CrouchSpeed; // 150 cm/s
+		TargetSpeed = CrouchSpeed * CrouchMod;
 	}
 
+	// Lekkie wyhamowanie prędkości tuż po dotknięciu ziemi (amortyzacja nóg na 0.35s):
+	if (LandingRecoveryTimer > 0.0f)
+	{
+		TargetSpeed *= 0.75f;
+	}
 
 	static const FGameplayTag GuardTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Combat.Guarding"), false);
 	if (StatusComp && StatusComp->HasStatusEffect(GuardTag))
 	{
-		TargetSpeed *= 0.65f; // Gracz manewruje wolniejszym, stabilnym krokiem!
+		TargetSpeed *= 0.65f;
 	}
 
-	// Mnożnik skręconej kostki / kulawizny:
 	if (HealthComp)
 	{
 		TargetSpeed *= HealthComp->GetMovementSpeedMultiplier();
 	}
 
-	// Mnożnik niesionego mebla (Fizyka rąk):
 	if (InteractionComp && InteractionComp->GetGrabbedActor())
 	{
 		if (IPhysicalInteract::Execute_GetInteractionType(InteractionComp->GetGrabbedActor()) == EInteractionType::Grab_Free)
@@ -261,7 +343,6 @@ void ALightkeeperCharacter::UpdateMovementSpeed()
 
 	GetCharacterMovement()->MaxWalkSpeed = TargetSpeed;
 }
-
 
 void ALightkeeperCharacter::Debug_TestLegs() { Debug_AddInjury(TEXT("Legs")); }
 void ALightkeeperCharacter::Debug_TestRightArm() { Debug_AddInjury(TEXT("RightArm")); }

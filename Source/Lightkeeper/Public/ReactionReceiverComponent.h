@@ -3,10 +3,11 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "GameplayTagContainer.h"
+#include "Engine/DataTable.h"
 #include "ReactionReceiverComponent.generated.h"
 
 // ====================================================================
-// STRUKTURA REGUŁ CHEMICZNYCH (TYLKO JEDNA DEKLARACJA Z PUBLIC!)
+// STRUKTURA REGUŁ CHEMICZNYCH
 // ====================================================================
 USTRUCT(BlueprintType)
 struct FChemicalReactionRule
@@ -38,6 +39,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStateRemoved, FGameplayTag, State
 
 class UHealthComponent;
 class UStatusEffectComponent;
+struct FStatusEffectDataRow;
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class LIGHTKEEPER_API UReactionReceiverComponent : public UActorComponent
@@ -47,7 +49,13 @@ class LIGHTKEEPER_API UReactionReceiverComponent : public UActorComponent
 public:
 	UReactionReceiverComponent();
 
-	// Tagi stanów, na które ten obiekt jest wrażliwy (opcjonalny fallback):
+	// ==========================================================
+	// BAZA DANYCH STATUSÓW (Jedno Źródło Prawdy dla Całej Gry)
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Database")
+	UDataTable* StatusEffectsDataTable;
+
+	// Tagi stanów, na które ten obiekt jest wrażliwy:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States")
 	FGameplayTagContainer VulnerableStates;
 
@@ -55,20 +63,8 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|ImSim States")
 	FGameplayTagContainer ActiveStates;
 
-	// ==========================================================
-	// PARAMETRY OBRAŻEŃ W CZASIE (DoT)
-	// ==========================================================
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|DoT")
-	float BurnDamagePerSecond = 10.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|DoT")
-	float AcidDamagePerSecond = 15.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|DoT")
-	float ShockDamagePerSecond = 8.0f;
-
 	// Czas samoczynnego wygaszenia ognia dla niezniszczalnych ścian (np. 8s):
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|DoT")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|Timing")
 	float AutoExtinguishDuration = 8.0f;
 
 	// ==========================================================
@@ -91,6 +87,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|ImSim States")
 	bool HasState(FGameplayTag StateTag) const { return ActiveStates.HasTag(StateTag); }
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|ImSim States")
+	bool IsVulnerableTo(const FGameplayTag& StateTag) const;
 
 protected:
 	virtual void BeginPlay() override;
@@ -115,5 +114,6 @@ private:
 	bool EvaluateReactionMatrix(const FGameplayTag& IncomingState, float Intensity, const FGameplayTag& OwnerMaterial);
 	void ProcessDoTTick();
 	void CheckAndManageDoTTimer();
-	bool IsVulnerableTo(const FGameplayTag& StateTag) const;
+
+	const FStatusEffectDataRow* FindStatusEffectRow(const FGameplayTag& StatusTag) const;
 };

@@ -7,6 +7,7 @@
 #include "ImSimSensorySubsystem.h"
 #include "InventoryTypes.h"
 #include "ToolManagerComponent.h"
+#include "ProgressionComponent.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
@@ -18,8 +19,12 @@ UHealthComponent::UHealthComponent()
 
 void UHealthComponent::BeginPlay()
 {
+	if (AActor* Owner = GetOwner())
+	{
+		CachedProgComp = Owner->FindComponentByClass<UProgressionComponent>();
+	}
+
 	Super::BeginPlay();
-	CurrentHealth = GetMaxHealth();
 	FractureMeter = 0.0f;
 	NightFatigueFloor = 0.0f;
 	ActiveInjuries.Reset();
@@ -29,6 +34,8 @@ void UHealthComponent::BeginPlay()
 	LowStaminaChestTimer = 0.0f;
 
 	RebuildCachedModifiers();
+
+	CurrentHealth = GetMaxHealth();
 
 	if (ALightkeeperCharacter* OwnerChar = Cast<ALightkeeperCharacter>(GetOwner()))
 	{
@@ -126,13 +133,34 @@ void UHealthComponent::RebuildCachedModifiers()
 // ====================================================================
 float UHealthComponent::GetMovementSpeedMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedWalkSpeedMultiplier; }
 float UHealthComponent::GetSprintSpeedCap() const { return bIsPalliativeActive ? 0.0f : CachedSprintSpeedCap; }
-float UHealthComponent::GetMeleeDamageMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedMeleeDamageMultiplier; }
 float UHealthComponent::GetMaxStaminaMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedMaxStaminaMultiplier; }
 float UHealthComponent::GetStaminaDrainMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedStaminaDrainMultiplier; }
-float UHealthComponent::GetThrowPowerMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedThrowPowerMultiplier; }
 float UHealthComponent::GetMouseResistanceMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedMouseResistanceMultiplier; }
 float UHealthComponent::GetChargedThrowPainCost() const { return bIsPalliativeActive ? 0.0f : CachedChargedThrowPain; }
 float UHealthComponent::GetGuardAbsorptionMultiplier() const { return bIsPalliativeActive ? 1.0f : CachedGuardAbsorptionMultiplier; }
+
+// Siła ciosów bronią: Uraz Ręki * Siła Mięśni z Wigoru (+15%/Tier):
+float UHealthComponent::GetMeleeDamageMultiplier() const
+{
+	float BaseMod = bIsPalliativeActive ? 1.0f : CachedMeleeDamageMultiplier;
+	float VigorMod = CachedProgComp ? CachedProgComp->GetPhysicalStrengthMultiplier() : 1.0f;
+	return BaseMod * VigorMod;
+}
+
+// Siła rzutu skrzyniami/kowadłami: Uraz Ręki * Siła Mięśni z Wigoru (+15%/Tier):
+float UHealthComponent::GetThrowPowerMultiplier() const
+{
+	float BaseMod = bIsPalliativeActive ? 1.0f : CachedThrowPowerMultiplier;
+	float VigorMod = CachedProgComp ? CachedProgComp->GetPhysicalStrengthMultiplier() : 1.0f;
+	return BaseMod * VigorMod;
+}
+
+// Max HP: (Bazowe 100 HP + Bonus Wigoru +25/Tier) * Mnożnik omdleń:
+float UHealthComponent::GetMaxHealth() const
+{
+	float VigorHP = CachedProgComp ? CachedProgComp->GetMaxHealthBonus() : 0.0f;
+	return (BaseMaxHealth + VigorHP) * MaxHealthCapMultiplier;
+}
 
 bool UHealthComponent::IsActionAllowed(EPlayerAction Action) const
 {
@@ -171,25 +199,18 @@ void UHealthComponent::HandleOwnerLanded(const FHitResult& Hit, float FallSpeed)
 {
 	if (bIsPalliativeActive) return;
 
-	// ====================================================================
-	// 1. ZWYKŁY FALL DAMAGE (Bezpieczny próg: 650 cm/s = ok. 2 metrów):
-	// ====================================================================
-	const float SafeFallSpeed = 650.0f;
+	// Domyślny bezpieczny upadek to 650 cm/s (~2 metry). Precyzja daje bonus +450 cm/s!
+	float SafeFallBonus = CachedProgComp ? CachedProgComp->GetSafeFallSpeedBonus() : 0.0f;
+	const float SafeFallSpeed = 650.0f + SafeFallBonus;
 
 	if (FallSpeed > SafeFallSpeed)
 	{
 		float ExcessSpeed = FallSpeed - SafeFallSpeed;
 		float CalculatedFallDamage = ExcessSpeed * 0.075f;
-
 		static const FGameplayTag FallDamageTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Fall"), false);
-
-		// TakeDamage sam zadba o złamanie nóg (przy >= 40 HP) lub skręcenie kostki (przy < 40 HP)!
 		TakeDamage(CalculatedFallDamage, FallDamageTag, Hit);
 	}
 
-	// ====================================================================
-	// 2. DODATKOWY BÓL ZE ZŁAMANEJ KOŚCI (Z tabeli DT_Injuries):
-	// ====================================================================
 	float TotalLandingPain = 0.0f;
 	for (const FGameplayTag& ActiveTag : ActiveInjuries)
 	{
@@ -269,7 +290,7 @@ void UHealthComponent::HandleOwnerLowStaminaTick(float DeltaTime)
 			{
 				if (!StatusComp->IsStunned())
 				{
-					StatusComp->ApplyStun(1.5f);
+					StatusComp->ApplyStun();
 				}
 			}
 		}
@@ -286,7 +307,7 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 	}
 
 	static const FGameplayTag StealthTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.StealthTakedown"), false);
-	if (DamageTypeTag.MatchesTag(StealthTag))
+	if (DamageTypeTag.MatchesTag(StealthTag) && GetOwner() && GetOwner()->IsA<APawn>())
 	{
 		bool bWasUnaware = true;
 
@@ -310,7 +331,7 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 				DamageAmount *= 1.5f;
 				if (UStatusEffectComponent* Status = GetOwner()->FindComponentByClass<UStatusEffectComponent>())
 				{
-					Status->ApplyStun(1.5f);
+					Status->ApplyStun();
 				}
 
 #if !UE_BUILD_SHIPPING
@@ -437,11 +458,14 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 	OnHealthChanged.Broadcast(CurrentHealth, GetMaxHealth());
 
 	// Hałas krzyku bólu dla AI:
-	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+	if (FinalCalculatedDamage >= 2.0f)
 	{
-		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-		float PainNoiseRadius = FMath::Clamp(FinalCalculatedDamage * 35.0f, 250.0f, 1800.0f);
-		Sensory->RegisterNoise(GetOwner()->GetActorLocation(), PainNoiseRadius, NoiseTag);
+		if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
+		{
+			static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
+			float PainNoiseRadius = FMath::Clamp(FinalCalculatedDamage * 35.0f, 250.0f, 1800.0f);
+			Sensory->RegisterNoise(GetOwner()->GetActorLocation(), PainNoiseRadius, NoiseTag);
+		}
 	}
 
 #if !UE_BUILD_SHIPPING
@@ -699,7 +723,7 @@ void UHealthComponent::AddInjury(FGameplayTag InjuryTag, EAnatomicalLimb Limb)
 		{
 			if (UStatusEffectComponent* StatusComp = Owner->FindComponentByClass<UStatusEffectComponent>())
 			{
-				StatusComp->ApplyBleed(30.0f, 1.0f, 3.0f);
+				StatusComp->ApplyBleed();
 			}
 		}
 	}
@@ -782,7 +806,7 @@ void UHealthComponent::UseLeeches()
 	{
 		if (UStatusEffectComponent* StatusComp = Owner->FindComponentByClass<UStatusEffectComponent>())
 		{
-			StatusComp->ApplyBleed(15.0f, 1.0f, 3.0f);
+			StatusComp->ApplyBleed();
 		}
 	}
 
