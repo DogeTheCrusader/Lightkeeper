@@ -140,7 +140,7 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 					float SlamRadius = FMath::Clamp((SlamSpeed * 4.5f) * MassFactor, 400.0f, 1500.0f);
 
 					// JEDNO ZUNIFIKOWANE WYWOŁANIE (Subsystem sam pomnoży przez Materiał Drewno vs Stal!):
-					Sensory->RegisterNoise(SoundLoc, SlamRadius, NoiseTag, MaterialTag);
+					Sensory->RegisterNoise(SoundLoc, SlamRadius, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 
 #if !UE_BUILD_SHIPPING
 					if (GEngine)
@@ -188,7 +188,7 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 					}
 
 					// 3. Subsystem sam przeliczy ostateczną głośność:
-					Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag, EffectiveMaterialTag);
+					Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag, EffectiveMaterialTag, AcousticNoiseMultiplier);
 				}
 			}
 		}
@@ -341,7 +341,7 @@ void ABaseInteractable::HandleDeath()
 	{
 		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
 		// Drewniana skrzynia = 6.5m, Szklana gablota = 11.7m, Metal = 9.7m:
-		Sensory->RegisterNoise(GetActorLocation(), 650.0f, NoiseTag, MaterialTag);
+		Sensory->RegisterNoise(GetActorLocation(), 650.0f, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 	}
 
 	TArray<UPrimitiveComponent*> PrimComps;
@@ -405,7 +405,7 @@ void ABaseInteractable::TriggerStateEmission()
 		// Zabezpieczenie limitu (od 6m dla małych fiolek do 50m dla wielkich kotłów):
 		float FinalNoiseRadius = FMath::Clamp(DynamicExplosionNoise, 600.0f, 5000.0f);
 
-		Sensory->RegisterNoise(EmissionLocation, FinalNoiseRadius, NoiseTag);
+		Sensory->RegisterNoise(EmissionLocation, FinalNoiseRadius, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 
 #if !UE_BUILD_SHIPPING
 		if (GEngine)
@@ -892,7 +892,7 @@ void ABaseInteractable::OnLockedInteraction_Implementation(AActor* InstigatorAct
 	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 	{
 		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-		Sensory->RegisterNoise(GetActorLocation(), 300.0f, NoiseTag);
+		Sensory->RegisterNoise(GetActorLocation(), 300.0f, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 	}
 	// TA FUNKCJA JEST WYWOŁYWANA PRZEZ [LPM].
 	// W Twoim Blueprincie (BP_BaseDoor) odpali się zdarzenie "Event OnLockedInteraction",
@@ -912,7 +912,7 @@ void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActo
 	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 	{
 		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-		Sensory->RegisterNoise(GetActorLocation(), 200.0f, NoiseTag);
+		Sensory->RegisterNoise(GetActorLocation(), 200.0f, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 	}
 
 	// 1. Zczytujemy klucz z lewej ręki LPM lub prawej dłoni FPP (Czysta Kompozycja):

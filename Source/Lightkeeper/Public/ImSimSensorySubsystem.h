@@ -15,9 +15,12 @@ public:
 
 	// Rejestruje hałas w świecie (Kroki, zeskoki, wybuchy, rzuty):
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Sensory")
-	void RegisterNoise(FVector Location, float Radius, FGameplayTag NoiseTag, FGameplayTag MaterialTag = FGameplayTag());
+	void RegisterNoise(FVector Location, float Radius, FGameplayTag NoiseTag, FGameplayTag MaterialTag = FGameplayTag(), float CustomMultiplier = 1.0f);
 
 	static float GetMaterialNoiseMultiplier(FGameplayTag MaterialTag);
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Sensory")
+	static float ExtractNoiseMultiplierFromActor(AActor* TargetActor);
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Sensory")
 	static FGameplayTag ExtractMaterialTagFromActor(AActor* TargetActor);

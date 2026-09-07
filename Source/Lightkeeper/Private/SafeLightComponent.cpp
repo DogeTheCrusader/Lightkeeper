@@ -77,7 +77,23 @@ void USafeLightComponent::SyncWithParentLight()
 {
 	if (AActor* Owner = GetOwner())
 	{
-		if (USpotLightComponent* SpotLight = Owner->FindComponentByClass<USpotLightComponent>())
+		USpotLightComponent* SpotLight = Owner->FindComponentByClass<USpotLightComponent>();
+		UPointLightComponent* PointLight = Owner->FindComponentByClass<UPointLightComponent>();
+
+		// Jeśli mamy ZARÓWNO PointLight JAK I SpotLight (Hybryda latarni miejskiej):
+		if (SpotLight && PointLight)
+		{
+			// Bezpieczny promień bierzemy z większego światła:
+			float MaxRadius = FMath::Max(SpotLight->AttenuationRadius, PointLight->AttenuationRadius);
+			SetSphereRadius(MaxRadius, true);
+
+			// Jeśli jest PointLight, wyłączamy twarde ograniczanie stożkiem (gracz jest bezpieczny pod całą latarnią!):
+			bIsSpotlightCone = false;
+			return;
+		}
+
+		// Jeśli jest TYLKO sam SpotLight (np. reflektor na wieży):
+		if (SpotLight)
 		{
 			SetSphereRadius(SpotLight->AttenuationRadius, true);
 			bIsSpotlightCone = true;
@@ -85,7 +101,8 @@ void USafeLightComponent::SyncWithParentLight()
 			return;
 		}
 
-		if (UPointLightComponent* PointLight = Owner->FindComponentByClass<UPointLightComponent>())
+		// Jeśli jest TYLKO sam PointLight (np. świeczka, ognisko):
+		if (PointLight)
 		{
 			SetSphereRadius(PointLight->AttenuationRadius, true);
 			bIsSpotlightCone = false;

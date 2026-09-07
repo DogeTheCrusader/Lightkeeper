@@ -98,4 +98,7 @@ public:
 
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "PhysicalInteract")
 	float GetMaterialPurity();
+
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "PhysicalInteract")
+	float GetAcousticNoiseMultiplier();
 };

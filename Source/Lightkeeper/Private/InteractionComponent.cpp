@@ -629,7 +629,8 @@ void UInteractionComponent::SlamInteraction(float CustomMultiplier)
 				float SlamNoiseRadius = (BaseThrowPower * CustomMultiplier) * 1.2f;
 
 				// JEDNO ZUNIFIKOWANE WYWOŁANIE (Subsystem sam pomnoży przez stal/drewno!):
-				Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), SlamNoiseRadius, NoiseTag, MatTag);
+				float ObjectCustomMod = UImSimSensorySubsystem::ExtractNoiseMultiplierFromActor(GrabbedActor);
+				Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), SlamNoiseRadius, NoiseTag, MatTag, ObjectCustomMod);
 			}
 
 			GrabbedComponent = nullptr;
@@ -876,7 +877,9 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 						float FinalManipulationNoise = BaseNoise * StealthMod;
 
 						static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-						Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), FinalManipulationNoise, NoiseTag, MatTag);
+						float ObjectCustomMod = UImSimSensorySubsystem::ExtractNoiseMultiplierFromActor(GrabbedActor);
+
+						Sensory->RegisterNoise(GrabbedActor->GetActorLocation(), BaseNoise, NoiseTag, MatTag, ObjectCustomMod);
 					}
 				}
 			}

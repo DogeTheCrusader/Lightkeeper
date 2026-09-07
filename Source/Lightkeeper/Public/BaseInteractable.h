@@ -54,6 +54,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics")
 	FGameplayTag MaterialTag;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics", meta = (ClampMin = "0.0", ToolTip = "Mnożnik hałasu: 1.0 = standard, 2.0 = skrzypiąca deska/pułapka, 0.2 = cichy mebel."))
+	float AcousticNoiseMultiplier = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Physics", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float MaterialPurity = 1.0f;
 
@@ -174,4 +177,5 @@ public:
 	virtual void TryUnlockFromInput_Implementation(AActor* InstigatorActor) override;
 	virtual FGameplayTag GetMaterialTag_Implementation() override { return MaterialTag; }
 	virtual float GetMaterialPurity_Implementation() override { return MaterialPurity; }
+	virtual float GetAcousticNoiseMultiplier_Implementation() override { return AcousticNoiseMultiplier; }
 };

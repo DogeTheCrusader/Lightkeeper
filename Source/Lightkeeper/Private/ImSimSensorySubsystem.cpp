@@ -31,6 +31,18 @@ float UImSimSensorySubsystem::GetMaterialNoiseMultiplier(FGameplayTag MaterialTa
 	return 1.0f; // Drewno/Kamień = 1.0x
 }
 
+float UImSimSensorySubsystem::ExtractNoiseMultiplierFromActor(AActor* TargetActor)
+{
+	if (!TargetActor) return 1.0f;
+
+	if (TargetActor->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+	{
+		return IPhysicalInteract::Execute_GetAcousticNoiseMultiplier(TargetActor);
+	}
+
+	return 1.0f;
+}
+
 FGameplayTag UImSimSensorySubsystem::ExtractMaterialTagFromActor(AActor* TargetActor)
 {
 	if (!TargetActor) return FGameplayTag::EmptyTag;
@@ -62,13 +74,16 @@ FGameplayTag UImSimSensorySubsystem::ExtractMaterialTagFromActor(AActor* TargetA
 	return FGameplayTag::EmptyTag; // Domyślne drewno/kamień -> mnożnik 1.0x
 }
 
-void UImSimSensorySubsystem::RegisterNoise(FVector Location, float Radius, FGameplayTag NoiseTag, FGameplayTag MaterialTag)
+void UImSimSensorySubsystem::RegisterNoise(FVector Location, float Radius, FGameplayTag NoiseTag, FGameplayTag MaterialTag, float CustomMultiplier)
 {
 	if (Radius <= 0.0f) return;
 
-	// 1. Automatycznie przeliczamy mnożnik materiału:
-	float Multiplier = GetMaterialNoiseMultiplier(MaterialTag);
-	float FinalRadius = Radius * Multiplier;
+	// 1. Wyliczamy ostateczny promień: Baza * Mnożnik Materiału * Mnożnik Sytuacyjny:
+	float MaterialMod = GetMaterialNoiseMultiplier(MaterialTag);
+	float SafeCustomMod = FMath::Max(0.0f, CustomMultiplier);
+	float FinalRadius = Radius * MaterialMod * SafeCustomMod;
+
+	if (FinalRadius <= 0.0f) return; // 100% cisza
 
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 
@@ -102,9 +117,11 @@ void UImSimSensorySubsystem::RegisterNoise(FVector Location, float Radius, FGame
 
 	if (GEngine)
 	{
-		FString MatStr = MaterialTag.IsValid() ? FString::Printf(TEXT(" [Materiał: %s x%.1f]"), *MaterialTag.ToString(), Multiplier) : TEXT("");
+		FString MatStr = MaterialTag.IsValid() ? FString::Printf(TEXT(" [Materiał: %s x%.1f]"), *MaterialTag.ToString(), MaterialMod) : TEXT("");
+		FString CustomStr = (CustomMultiplier != 1.0f) ? FString::Printf(TEXT(" [Mnożnik: x%.2f]"), CustomMultiplier) : TEXT("");
+
 		GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Yellow,
-			FString::Printf(TEXT("🔊 [AI SŁYSZY] Fala dźwiękowa: %.0f cm (%.1f m)%s"), FinalRadius, FinalRadius / 100.0f, *MatStr));
+			FString::Printf(TEXT("🔊 [AI SŁYSZY] Fala dźwiękowa: %.0f cm (%.1f m)%s%s"), FinalRadius, FinalRadius / 100.0f, *MatStr, *CustomStr));
 	}
 #endif
 }

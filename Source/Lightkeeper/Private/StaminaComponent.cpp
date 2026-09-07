@@ -145,7 +145,9 @@ void UStaminaComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAct
 					if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 					{
 						static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-						Sensory->RegisterNoise(Owner->GetActorLocation(), FinalFootstepRadius, NoiseTag, FloorMaterialTag);
+						float FloorCustomMod = UImSimSensorySubsystem::ExtractNoiseMultiplierFromActor(FloorHit.GetActor());
+
+						Sensory->RegisterNoise(Owner->GetActorLocation(), BaseNoiseRadius, NoiseTag, FloorMaterialTag, FloorCustomMod);
 					}
 				}
 			}
