@@ -108,6 +108,54 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 	if (this->bIsHeld || bOtherHeld) return;
 
 	// ====================================================================
+	// DYNAMICZNY NACISK MASY Z GÓRY (Kruszenie pod butami lub zrzuconym ciężarem):
+	// ====================================================================
+	if (bBreaksUnderWeight && OtherActor)
+	{
+		// Weryfikujemy uderzenie/nacisk pionowo Z GÓRY:
+		if (Hit.ImpactNormal.Z < -0.60f)
+		{
+			float IncomingWeight = 0.0f;
+
+			// A. Gracz lub postać (Pawn) wskakuje na obiekt:
+			if (APawn* SteppingPawn = Cast<APawn>(OtherActor))
+			{
+				// Baza wagi postaci:
+				IncomingWeight = 75.0f;
+
+				// Jeśli postać NIESIE w dłoniach ciężar -> masa niesionego obiektu sumuje się z wagą gracza!
+				if (UInteractionComponent* InterComp = SteppingPawn->FindComponentByClass<UInteractionComponent>())
+				{
+					if (UPrimitiveComponent* CarriedComp = InterComp->GetGrabbedComponent())
+					{
+						IncomingWeight += CarriedComp->GetMass();
+					}
+				}
+			}
+			// B. Inny fizyczny obiekt postawiony/zrzucony na ten mebel:
+			else if (OtherComp && OtherComp->IsSimulatingPhysics())
+			{
+				IncomingWeight = OtherComp->GetMass();
+			}
+
+			// Sprawdzamy dynamiczny próg wytrzymałości obiektu:
+			if (IncomingWeight >= MaxLoadWeightKg)
+			{
+#if !UE_BUILD_SHIPPING
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Red,
+						FString::Printf(TEXT("💥 [%s] Załamanie konstrukcji pod masą: %.1f kg (Limit: %.1f kg)!"),
+							*GetName(), IncomingWeight, MaxLoadWeightKg));
+				}
+#endif
+				HandleDeath();
+				return;
+			}
+		}
+	}
+
+	// ====================================================================
 	// 2. PRAWDZIWA PRĘDKOŚĆ LOTU (BEZ FAŁSZYWYCH IMPULSÓW CHAOSU):
 	// ====================================================================
 	FVector MyVel = HitComponent ? HitComponent->GetComponentVelocity() : FVector::ZeroVector;
@@ -866,7 +914,7 @@ void ABaseInteractable::SetLocked_Implementation(bool bNewLocked)
 
 	if (!bNewLocked)
 	{
-		//bIsLatched = false;
+		//	bIsLatched = false;
 	}
 
 	if (GateComp)
@@ -874,6 +922,7 @@ void ABaseInteractable::SetLocked_Implementation(bool bNewLocked)
 		GateComp->bIsLocked = bNewLocked;
 	}
 }
+
 bool ABaseInteractable::IsLatched_Implementation() { return bIsLatched; }
 FGameplayTag ABaseInteractable::GetPropSizeTag_Implementation() { return PropSizeTag; }
 

@@ -42,6 +42,7 @@ ALightkeeperCharacter::ALightkeeperCharacter()
 		GetCharacterMovement()->SetCrouchedHalfHeight(CrouchingCapsuleHalfHeight);
 		GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
 		GetCharacterMovement()->AirControl = 0.4f;
+		GetCharacterMovement()->JumpZVelocity = JumpHeight;
 	}
 
 	if (GetCapsuleComponent())
@@ -86,6 +87,7 @@ void ALightkeeperCharacter::BeginPlay()
 	if (GetCharacterMovement())
 	{
 		GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+		GetCharacterMovement()->JumpZVelocity = JumpHeight;
 	}
 }
 
@@ -222,7 +224,8 @@ void ALightkeeperCharacter::Jump()
 	if (GetCharacterMovement())
 	{
 		float JumpMultiplier = ProgressionComp ? ProgressionComp->GetJumpBonusMultiplier() : 1.0f;
-		GetCharacterMovement()->JumpZVelocity = 420.0f * JumpMultiplier;
+		//JumpHeight = JumpHeight * JumpMultiplier;
+		GetCharacterMovement()->JumpZVelocity = JumpHeight * JumpMultiplier;
 	}
 
 	Super::Jump();

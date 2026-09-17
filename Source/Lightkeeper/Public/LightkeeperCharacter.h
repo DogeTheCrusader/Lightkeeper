@@ -76,6 +76,9 @@ public:
 	float CrouchSpeed = 150.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")
+	float JumpHeight = 420.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")
 	float StandingCapsuleHalfHeight = 88.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")

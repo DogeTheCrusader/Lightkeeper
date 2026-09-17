@@ -94,6 +94,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction")
 	float ImpactHardness = 1.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction")
+	bool bBreaksUnderWeight = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Destruction", meta = (EditCondition = "bBreaksUnderWeight", ClampMin = "10.0"))
+	float MaxLoadWeightKg = 70.0f;
+
 	// ====================================================================
 	// 4. JEDNO ŹRÓDŁO PRAWDY: DANE PRZEDMIOTU I WYBUCHÓW (Master Struct)
 	// ====================================================================

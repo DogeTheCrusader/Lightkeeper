@@ -164,6 +164,9 @@ private:
 	UPROPERTY()
 	APlayerCameraManager* CachedCameraManager = nullptr;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Lightkeeper|Physics")
+	float HeavyPropMaxLiftHeight = 65.0f;
+
 	FVector InitialHoldSlotLocation;
 	FRotator InitialHoldSlotRotation;
 	FVector SmoothedHoldLocation;

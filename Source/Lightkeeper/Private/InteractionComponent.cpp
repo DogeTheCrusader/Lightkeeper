@@ -162,6 +162,34 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 				// FIX: HYBRYDOWY SWEEP Z TŁUMIENIEM DLA DUŻYCH SKRZYŃ I DROP > 100KG
 				// ====================================================================
 				FVector IdealHoldLoc = CameraLoc + (CameraForward * SmoothedHoldDistance);
+
+				// ====================================================================
+				// DYNAMICZNY KAGANIEC Z-AXIS (Skalowany Wigorem RPG przez PULL API):
+				// ====================================================================
+				const float PropMass = GrabbedComp->GetMass();
+
+				// 1. Odpytujemy Wigor gracza przez PULL API:
+				float VigorBonus = 1.0f;
+				if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+				{
+					// Pobieramy siłę fizyczną (Tier 0 = 1.0x, Tier 1 = 1.15x, Tier 2 = 1.30x itd.):
+					VigorBonus = ProgComp->GetPhysicalStrengthMultiplier();
+				}
+
+				// Bazowy komfort noszenia (30kg) skalowany siłą postaci:
+				const float MaxComfortMass = 30.0f * VigorBonus * (Owner->ActorHasTag(FName("Perk.Vigor.HeavyLifter")) ? 2.2f : 1.0f);
+
+				// 2. Jeśli obiekt jest za ciężki na obecny poziom siły gracza:
+				if (PropMass > MaxComfortMass)
+				{
+					// Im większa nadwaga, tym niżej obiekt musi być trzymany (od pasa do kostek):
+					float OverweightRatio = FMath::Clamp((PropMass - MaxComfortMass) / 60.0f, 0.0f, 1.0f);
+					float TargetLiftHeight = FMath::Lerp(HeavyPropMaxLiftHeight, 20.0f, OverweightRatio);
+
+					float MaxAllowedZ = OwnerLoc.Z - 30.0f + TargetLiftHeight;
+					IdealHoldLoc.Z = FMath::Min(IdealHoldLoc.Z, MaxAllowedZ);
+				}
+
 				FVector ActualTargetLoc = IdealHoldLoc;
 
 				FHitResult SweepHit;
