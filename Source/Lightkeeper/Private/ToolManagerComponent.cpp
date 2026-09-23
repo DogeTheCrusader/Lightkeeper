@@ -305,6 +305,35 @@ void UToolManagerComponent::Input_Guard_Released()
 	}
 }
 
+void UToolManagerComponent::Input_Roll_Pressed()
+{
+	if (AActor* Owner = GetOwner())
+	{
+		if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
+		{
+			// Jeśli gracz niesie fizyczny prop -> włączamy tryb obrotu osi:
+			if (InterComp->GetGrabbedComponent() != nullptr)
+			{
+				InterComp->StartPropRollMode();
+				return;
+			}
+		}
+	}
+
+	// JEŚLI NIE NIESIE PROPA: Tutaj klawisz Q może robić coś innego (np. szybki rzut nożem w walce)!
+}
+
+void UToolManagerComponent::Input_Roll_Released()
+{
+	if (AActor* Owner = GetOwner())
+	{
+		if (UInteractionComponent* InterComp = Owner->FindComponentByClass<UInteractionComponent>())
+		{
+			InterComp->StopPropRollMode();
+		}
+	}
+}
+
 void UToolManagerComponent::EquipToolFromInventorySlot(int32 SlotIndex)
 {
 	if (AActor* Owner = GetOwner())

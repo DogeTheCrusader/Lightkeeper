@@ -81,6 +81,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Input")
 	void Input_Guard_Released();
 
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Input")
+	void Input_Roll_Pressed();
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Input")
+	void Input_Roll_Released();
+
 	// ==========================================================
 	// 4. FUNKCJE EKWIPUNKU I WYCIĄGANIA BRONI
 	// ==========================================================

@@ -119,6 +119,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
 	bool ProcessMouseLook(float MouseX, float MouseY, float CameraSensitivity);
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Interaction")
+	bool bIsRollingProp = false;
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
+	void StartPropRollMode() { bIsRollingProp = true; }
+
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
+	void StopPropRollMode() { bIsRollingProp = false; }
+
 	// ====================================================================
 	// 5. EKWIPUNEK I ZUŻYWANIE POD KLAWISZEM [E]
 	// ====================================================================
@@ -179,6 +188,8 @@ private:
 
 	float AccumulatedMechanismEffort = 0.0f;
 	float LastMechanismPainTime = 0.0f;
+
+	float CurrentRollOffset = 0.0f;
 
 	float ObstacleLagTimer = 0.0f;
 

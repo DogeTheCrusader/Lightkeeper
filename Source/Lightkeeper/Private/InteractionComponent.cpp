@@ -236,8 +236,13 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 					GrabbedComp->SetPhysicsAngularVelocityInDegrees(AngularVel.GetClampedToMaxSize(MaxAngularSpeedDeg));
 				}
 
-				FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * InitialGrabQuat;
+				// 1. Wyliczamy obrót wokół własnej osi wzdłużnej z klawiszy Q/E:
+				FQuat LocalRoll(FVector::ForwardVector, FMath::DegreesToRadians(CurrentRollOffset));
+
+				// Mnożenie lokalne: najpierw obrót wokół własnej osi, potem orientacja kamery:
+				FQuat TargetQuat = HoldSlotComponent->GetComponentTransform().GetRotation() * (InitialGrabQuat * LocalRoll);
 				TargetQuat.Normalize();
+
 				PhysicsHandle->SetTargetLocationAndRotation(SmoothedHoldLocation, TargetQuat.Rotator());
 			}
 		}
@@ -767,6 +772,33 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 		{
 			ArmResistance = Health->GetMouseResistanceMultiplier();
 		}
+	}
+
+	// ====================================================================
+	// TRYB OBRACANIA WOKÓŁ WŁASNEJ OSI (Przytrzymanie klawisza Q):
+	// ====================================================================
+	if (bIsRollingProp && GrabbedActor && PhysicsHandle)
+	{
+		// 1. Pobieramy masę przedmiotu (dokładnie tak jak w trybie R!):
+		const float ObjectMass = (GrabbedComponent && GrabbedComponent->IsSimulatingPhysics())
+			? GrabbedComponent->GetMass()
+			: 1.0f;
+
+		// 2. Wyliczamy opór masy - ciężka deska stawia opór dłoniom:
+		const float RollSensitivity = FMath::Clamp(1.0f / FMath::Max(1.0f, ObjectMass * InspectWeightMultiplier * ArmResistance), 0.015f, 0.45f);
+
+		// 3. Płynny obrót z oporem:
+		CurrentRollOffset -= MouseX * RollSensitivity * 1.8f;
+		CurrentRollOffset = FMath::Fmod(CurrentRollOffset, 360.0f);
+
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(8888, 0.05f, FColor::Yellow,
+				FString::Printf(TEXT("🔄 [ROLL] Masa: %.1f kg | Kąt: %.1f°"), ObjectMass, CurrentRollOffset));
+		}
+#endif
+		return true;
 	}
 
 	// ====================================================================
