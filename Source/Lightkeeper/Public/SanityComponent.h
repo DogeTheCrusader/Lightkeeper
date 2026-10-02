@@ -9,7 +9,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSanityChanged, float, CurrentSan
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMinorMadnessTriggered, FGameplayTag, MadnessTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBoutOfMadnessTriggered, FGameplayTag, BoutTag);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPsychologicalCollapse, int32, CollapseCount);
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTotalMentalBreakdown);
+
+UENUM(BlueprintType)
+enum class EIlluminationState : uint8
+{
+	DirectLight UMETA(DisplayName = "Bezpośrednie Światło"),
+	Penumbra    UMETA(DisplayName = "Półmrok (Penumbra)"),
+	Darkness    UMETA(DisplayName = "Głęboki Mrok")
+};
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class LIGHTKEEPER_API USanityComponent : public UActorComponent
@@ -69,6 +78,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sanity")
 	float DarknessAccelerationFactor = 0.08f;
 
+	// ==========================================================
+	// REGULACJA PÓŁMROKU (PENUMBRA TUNING)
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Penumbra Tuning")
+	float PenumbraRadiusMultiplier = 1.7f;
+
+	// 1. Gdzie kończy się pełne światło? (0.60 = pierwsze 60% zasięgu lampy to regeneracja, reszta to półmrok):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Penumbra Tuning")
+	float DirectLightCorePercent = 0.60f;
+
+	// 2. Mnożnik rozlania półmroku wokół lampy (1.5x = półmrok sięga o 50% dalej niż samo światło żarówki):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Penumbra Tuning")
+	float PenumbraAuraMultiplier = 1.5f;
+
+	// 3. Minimalny zasięg półmroku w cm (750.0f = gwarantowane 7.5 metra strefy bezpieczeństwa nawet przy małej świeczce):
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Penumbra Tuning")
+	float MinPenumbraDistance = 750.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Penumbra Tuning")
+	float LightVisualMemoryDuration = 1.2f;
+
 	// Spojrzenie na potwora (Gaze Dread):
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
 	bool bIsLookingAtMonster = false;
@@ -81,6 +111,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Sanity")
 	const TArray<class USafeLightComponent*>& GetOverlappingLightSources() const { return OverlappingLightSources; }
+
+	bool CheckCanSeeAnyLightSource();
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Sanity")
+	EIlluminationState CurrentIllumination = EIlluminationState::Darkness;
 
 	// ==========================================================
 	// 3. SZALEŃSTWO I FAIL FORWARD
@@ -165,4 +200,6 @@ private:
 	void HandleSanityDepleted();
 	void TriggerRandomMinorMadness();
 	void TriggerMajorBoutOfMadness();
+
+	float TimeSinceLastSawLight = 99.0f;
 };

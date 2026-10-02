@@ -3,7 +3,9 @@
 #include "ProgressionComponent.h"
 #include "ReactionReceiverComponent.h"
 #include "ImSimSensorySubsystem.h"
-#include "ProgressionComponent.h"
+//#include "ProgressionComponent.h"
+#include "StatusEffectComponent.h"
+#include "InventoryComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "PhysicsEngine/PhysicsHandleComponent.h"
 #include "Camera/CameraComponent.h"
@@ -104,9 +106,12 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 	// 1. Aktualizacja celownika
 	UpdateCrosshairState(HeldType, bHolding);
 
-	if (bHolding && HeldType == EInteractionType::Grab_Free)
+	if (bHolding)
 	{
-		ProcessHeldObjectHazardConduction(DeltaTime);
+		if (ProcessHeldObjectHazardConduction(DeltaTime))
+		{
+			return;
+		}
 	}
 	else
 	{
@@ -375,6 +380,49 @@ void UInteractionComponent::StartInteraction()
 				return; // Nie chwyta klamki!
 			}
 
+			if (UReactionReceiverComponent* PropReaction = HitActor->FindComponentByClass<UReactionReceiverComponent>())
+			{
+				FGameplayTag ActiveHazardTag;
+				if (PropReaction->GetFirstActiveHazard(ActiveHazardTag))
+				{
+					// 1. POBIERAMY DANE STATUSU Z TABELI (Jedno Źródło Prawdy!):
+					const FStatusEffectDataRow* HazardRow = PropReaction->FindStatusEffectRow(ActiveHazardTag);
+
+					// 2. NATYCHMIASTOWE OBRAŻENIA DOTYKOWE (Równe DamagePerTick z tabeli!):
+					if (HazardRow && HazardRow->DamagePerTick > 0.0f)
+					{
+						if (UHealthComponent* Health = Owner->FindComponentByClass<UHealthComponent>())
+						{
+							Health->TakeDamage(HazardRow->DamagePerTick, ActiveHazardTag);
+
+#if !UE_BUILD_SHIPPING
+							if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Orange,
+								FString::Printf(TEXT("🖐️ [BÓL KONTAKTU] Dotknięto zagrożenia! -%.1f HP (Z tabeli: %s)"),
+									HazardRow->DamagePerTick, *ActiveHazardTag.ToString()));
+#endif
+						}
+					}
+
+					// 3. WERYFIKACJA TOLERANCJI (Czy stan pozwala na chwyt?):
+					float AllowedDelay = HazardRow ? HazardRow->ContactConductionDelay : 0.0f;
+
+					// Jeśli Delay == 0.0s (np. Prąd) -> natychmiastowy paraliż i brak możliwości chwytu:
+					if (AllowedDelay <= 0.0f)
+					{
+						if (UReactionReceiverComponent* PlayerReaction = Owner->FindComponentByClass<UReactionReceiverComponent>())
+						{
+							PlayerReaction->ApplyStateImpact(ActiveHazardTag, 1.0f);
+						}
+#if !UE_BUILD_SHIPPING
+						if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan, TEXT("⚡ [PRĄD] Szok elektryczny uniemożliwia chwycenie!"));
+#endif
+						return; // Zatrzymujemy interakcję - gracz nie dotknie klamki
+					}
+
+					// Dla Ognia / Kwasu kod idzie DALEJ: gracz chwyta mebel, ale zaczyna tykać bufor!
+				}
+			}
+
 			switch (Type)
 			{
 			case EInteractionType::Hinge:
@@ -417,6 +465,8 @@ void UInteractionComponent::StartInteraction()
 
 				GrabbedActor = HitActor;
 				GrabbedComponent = MeshToGrab;
+
+				CurrentRollOffset = 0.0f;
 
 				//GrabbedComponent->OnComponentHit.AddUniqueDynamic(this, &UInteractionComponent::OnGrabbedComponentHit);
 
@@ -540,6 +590,13 @@ void UInteractionComponent::StopInteraction()
 	{
 		AActor* Owner = GetOwner();
 
+		// 1. NAJPIERW zwalniamy chwyt fizyczny:
+		if (PhysicsHandle)
+		{
+			PhysicsHandle->ReleaseComponent();
+		}
+
+		// 2. DOPIERO TERAZ przywracamy kolizje i nadajemy lekki impuls zrzutu:
 		if (GrabbedComponent)
 		{
 			GrabbedComponent->SetLinearDamping(0.01f);
@@ -551,9 +608,6 @@ void UInteractionComponent::StopInteraction()
 				GrabbedComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
 				GrabbedComponent->IgnoreActorWhenMoving(Owner, false);
 
-				// ====================================================================
-				// CZYSTE PRZYWRÓCENIE KOLIZJI (BEZ CASTOWANIA):
-				// ====================================================================
 				if (UCapsuleComponent* Capsule = Owner->FindComponentByClass<UCapsuleComponent>())
 				{
 					Capsule->IgnoreActorWhenMoving(GrabbedActor, false);
@@ -571,8 +625,6 @@ void UInteractionComponent::StopInteraction()
 		{
 			IPhysicalInteract::Execute_ReleaseObject(GrabbedActor);
 		}
-
-		if (PhysicsHandle) PhysicsHandle->ReleaseComponent();
 
 		CleanupInteraction();
 	}
@@ -985,14 +1037,9 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 
 void UInteractionComponent::CleanupInteraction()
 {
-	/*
-	if (GrabbedComponent)
-	{
-		// Odpinamy zdarzenie kolizji
-		GrabbedComponent->OnComponentHit.RemoveDynamic(this, &UInteractionComponent::OnGrabbedComponentHit);
-	}*/
-
 	bIsInspecting = false;
+	bIsRollingProp = false;        // <--- DODAJ TO (wyłącz flagę rolla)
+	CurrentRollOffset = 0.0f;      // <--- KLUCZOWY FIX: Zerujemy kąt obrotu Q!
 	AccumulatedMechanismEffort = 0.0f;
 	LastMechanismPainTime = 0.0f;
 	HeldPropBurnExposureTimer = 0.0f;
@@ -1107,72 +1154,120 @@ void UInteractionComponent::TryPickupFocusedObject()
 
 void UInteractionComponent::TryQuickConsumeFocusedObject()
 {
-	FHitResult Hit;
+	// 1. KONSUMOWANIE PRZEDMIOTU Z DŁONI FPP:
+	if (UToolManagerComponent* ToolMgr = GetOwner()->FindComponentByClass<UToolManagerComponent>())
+	{
+		if (ToolMgr->CurrentEquippedTool)
+		{
+			// Wywołujemy interfejs bezpośrednio na narzędziu/przedmiocie w dłoni!
+			// Narzędzie samo aplikuje leczenie/paliwo i samo się niszczy:
+			if (ToolMgr->CurrentEquippedTool->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
+			{
+				if (IPhysicalInteract::Execute_ConsumeObject(ToolMgr->CurrentEquippedTool, GetOwner()))
+				{
+					// Usuwamy 1 sztukę z plecaka i chowamy z rąk:
+					if (UInventoryComponent* InvComp = GetOwner()->FindComponentByClass<UInventoryComponent>())
+					{
+						InvComp->ConsumeItemByTag(ToolMgr->CurrentEquippedTool->ToolItemData.ItemTag, 1);
+					}
+					ToolMgr->HolsterCurrentTool();
+					return;
+				}
+			}
+		}
+	}
 
+	// 2. KONSUMOWANIE ZE STOŁU:
+	FHitResult Hit;
 	if (PerformLineTrace(Hit) && Hit.GetActor())
 	{
-		AActor* HitActor = Hit.GetActor();
-		if (HitActor->Implements<UPhysicalInteract>())
+		if (Hit.GetActor()->GetClass()->ImplementsInterface(UPhysicalInteract::StaticClass()))
 		{
-			IPhysicalInteract::Execute_ConsumeObject(HitActor, GetOwner());
+			IPhysicalInteract::Execute_ConsumeObject(Hit.GetActor(), GetOwner());
 		}
 	}
 }
 
-void UInteractionComponent::ProcessHeldObjectHazardConduction(float DeltaTime)
+bool UInteractionComponent::ProcessHeldObjectHazardConduction(float DeltaTime)
 {
 	if (!GrabbedActor)
 	{
 		HeldPropBurnExposureTimer = 0.0f;
-		return;
+		return false;
 	}
 
 	if (UReactionReceiverComponent* PropReaction = GrabbedActor->FindComponentByClass<UReactionReceiverComponent>())
 	{
-		static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
-		static const FGameplayTag ElectrocutedStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Electrocuted"), false);
-		static const FGameplayTag FireElement = FGameplayTag::RequestGameplayTag(FName("State.Element.Thermal.Fire"), false);
-		static const FGameplayTag ElectricityElement = FGameplayTag::RequestGameplayTag(FName("State.Element.Electricity.Current"), false);
-
-		// 1. ELEKTRYCZNOŚĆ: Natychmiastowe porażenie + Drop z rąk:
-		if (PropReaction->HasState(ElectrocutedStatus))
+		FGameplayTag ActiveHazardTag;
+		if (PropReaction->GetFirstActiveHazard(ActiveHazardTag))
 		{
-			if (UReactionReceiverComponent* PlayerReaction = GetOwner()->FindComponentByClass<UReactionReceiverComponent>())
-			{
-				PlayerReaction->ApplyStateImpact(ElectricityElement, 1.0f);
-			}
+			const FStatusEffectDataRow* HazardRow = PropReaction->FindStatusEffectRow(ActiveHazardTag);
+			float AllowedDelay = HazardRow ? HazardRow->ContactConductionDelay : 0.0f;
 
-#if !UE_BUILD_SHIPPING
-			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan, TEXT("⚡ [PRĄD] Trzymany obiekt poraził dłonie! Upuszczono!"));
-#endif
-			StopInteraction();
-			return;
-		}
-
-		// 2. OGIEŃ: Nagrzewanie i podpalenie po 1.5 sekundy ciągłego trzymania:
-		if (PropReaction->HasState(BurningStatus))
-		{
-			HeldPropBurnExposureTimer += DeltaTime;
-			if (HeldPropBurnExposureTimer >= 1.5f)
+			// ====================================================================
+			// 1. STAN NATYCHMIASTOWY (np. Prąd: Delay == 0.0s):
+			// ====================================================================
+			if (AllowedDelay <= 0.0f)
 			{
 				HeldPropBurnExposureTimer = 0.0f;
-				if (UReactionReceiverComponent* PlayerReaction = GetOwner()->FindComponentByClass<UReactionReceiverComponent>())
+				AActor* OwnerActor = GetOwner();
+
+				// A. Aplikujemy pełny status paraliżu z tabeli do StatusEffectComponent:
+				if (UStatusEffectComponent* StatusComp = OwnerActor->FindComponentByClass<UStatusEffectComponent>())
 				{
-					PlayerReaction->ApplyStateImpact(FireElement, 1.0f);
+					StatusComp->ApplyStatusEffectFromTable(ActiveHazardTag);
+				}
+
+				// B. Notyfikujemy chemię reakcji ciała:
+				if (UReactionReceiverComponent* PlayerReaction = OwnerActor->FindComponentByClass<UReactionReceiverComponent>())
+				{
+					PlayerReaction->ApplyStateImpact(ActiveHazardTag, 1.0f);
 				}
 
 #if !UE_BUILD_SHIPPING
-				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Red, TEXT("🔥 [OGIEŃ] Płonący obiekt poparzył dłonie!"));
+				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan,
+					FString::Printf(TEXT("⚡ [SZOK] Porażenie prądem z tabeli! Nałożono status: %s"), *ActiveHazardTag.ToString()));
 #endif
+				StopInteraction();
+				return true;
 			}
-		}
-		else
-		{
-			HeldPropBurnExposureTimer = 0.0f;
+
+			// ====================================================================
+			// 2. STAN Z BUFOREM (Ogień, Kwas, Para):
+			// ====================================================================
+			HeldPropBurnExposureTimer += DeltaTime;
+
+			if (HeldPropBurnExposureTimer >= AllowedDelay)
+			{
+				HeldPropBurnExposureTimer = 0.0f;
+				AActor* OwnerActor = GetOwner();
+
+				// A. NAKŁADAMY PEŁNY STATUS Z TABELI (np. 8s płonięcia, -10 HP/s!):
+				if (UStatusEffectComponent* StatusComp = OwnerActor->FindComponentByClass<UStatusEffectComponent>())
+				{
+					StatusComp->ApplyStatusEffectFromTable(ActiveHazardTag);
+				}
+
+				// B. Notyfikujemy ReactionReceiver (jeśli np. gracz wskoczy do wody):
+				if (UReactionReceiverComponent* PlayerReaction = OwnerActor->FindComponentByClass<UReactionReceiverComponent>())
+				{
+					PlayerReaction->ApplyStateImpact(ActiveHazardTag, 1.0f);
+				}
+
+#if !UE_BUILD_SHIPPING
+				if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Red,
+					FString::Printf(TEXT("🔥 [KONSEKWENCJA] Trzymano za długo! Gracz staje w płomieniach / trawiony! Status: %s (Czas z tabeli!)"),
+						*ActiveHazardTag.ToString()));
+#endif
+				// C. Ręce puszczają obiekt z bólu:
+				StopInteraction();
+				return true;
+			}
+
+			return false; // Gracz jeszcze bezpiecznie trzyma
 		}
 	}
-	else
-	{
-		HeldPropBurnExposureTimer = 0.0f;
-	}
+
+	HeldPropBurnExposureTimer = 0.0f;
+	return false;
 }

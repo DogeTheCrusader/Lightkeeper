@@ -58,6 +58,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Inventory")
 	class ABaseInteractable* DropItem(int32 ItemIndex, FVector DropLocation, FRotator DropRotation);
 
+	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Inventory")
+	bool ConsumeItemByTag(FGameplayTag ItemTag, int32 AmountToConsume = 1);
+
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Inventory")
 	bool HasItemWithTag(FGameplayTag ItemTag) const;
 

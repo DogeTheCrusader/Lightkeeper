@@ -189,6 +189,35 @@ public:
 	bool bIsPalliativeActive = false;
 
 	// ==========================================================
+	// PANEL STROJENIA PRZETRWANIA I WALKI (DETAILS PANEL)
+	// ==========================================================
+
+	// --- UPADKI I LĄDOWANIE ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Falling")
+	float BaseSafeFallSpeed = 550.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Falling")
+	float FallDamageMultiplier = 0.12f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Falling")
+	float LandingPainSpeedThreshold = 600.0f;
+
+	// --- KOŚCI I URAZY ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Injuries", meta = (EditCondition = "bCanReceiveInjuries"))
+	float CriticalMajorDamageThreshold = 40.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Injuries", meta = (EditCondition = "bCanReceiveInjuries"))
+	float TissueExhaustionEvolutionChance = 0.70f;
+
+	// --- GARDA I WALKA ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Combat")
+	float BaseFistGuardAbsorption = 0.35f;
+
+	// --- AKUSTYKA DLA AI ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Sensory")
+	float PainNoiseMultiplier = 35.0f;
+
+	// ==========================================================
 	// 5. DELEGATY
 	// ==========================================================
 	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Health")

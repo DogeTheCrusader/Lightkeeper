@@ -138,6 +138,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Chemistry")
 	void FillContainerWithLiquid(FGameplayTag LiquidElementTag, float Purity = 1.0f);
 
+	// ====================================================================
+	// DYNAMICZNE ŹRÓDŁO ŚWIATŁA (Świeczki, Kinkiety, Lampy)
+	// ====================================================================
+
 protected:
 	UFUNCTION()
 	virtual void HandleDeath();

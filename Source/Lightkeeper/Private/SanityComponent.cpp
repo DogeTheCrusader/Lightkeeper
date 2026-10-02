@@ -32,15 +32,18 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// ====================================================================
+	// 1. SPRAWDZANIE BEZPOŚREDNIEGO ŚWIATŁA (DIRECT LIGHT)
+	// ====================================================================
 	bool bIsPhysicallyIlluminated = false;
 
-	// 1. BEZPIECZNY POKÓJ (Sanctuary):
+	// A. Bezpieczny Pokój (Sanctuary):
 	if (IsInSanctuary())
 	{
 		bIsPhysicallyIlluminated = true;
 	}
 
-	// 2. LATARNIA GRACZA:
+	// B. Latarnia Gracza:
 	if (!bIsPhysicallyIlluminated)
 	{
 		if (ALightkeeperCharacter* Player = Cast<ALightkeeperCharacter>(GetOwner()))
@@ -52,24 +55,150 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 		}
 	}
 
-	// 3. ŚWIATŁA ZEWNĘTRZNE (LineTrace):
+	// C. Promień fizyczny ze źródeł zewnętrznych:
 	if (!bIsPhysicallyIlluminated)
 	{
 		bIsPhysicallyIlluminated = CheckLightLineOfSight();
 	}
 
-	bIsInDarkness = !bIsPhysicallyIlluminated;
+	// ====================================================================
+	// 2. WYZNACZANIE STANU (ŚWIATŁO / PÓŁMROK / GŁĘBOKI MROK)
+	// ====================================================================
+	if (bIsPhysicallyIlluminated)
+	{
+		CurrentIllumination = EIlluminationState::DirectLight;
+	}
+	else
+	{
+		// 1. Czy gracz ma w kadrze aktywne źródło światła?
+		bool bDirectlySeesLight = CheckCanSeeAnyLightSource();
+
+		if (bDirectlySeesLight)
+		{
+			TimeSinceLastSawLight = 0.0f; // Widzimy światło na bieżąco!
+		}
+		else
+		{
+			TimeSinceLastSawLight += DeltaTime; // Zliczamy czas od zniknięcia światła z kadru
+		}
+
+		// Półmrok wzrokowy trwa jeszcze przez 1.2 sekundy po zniknięciu lampy z kadru (pamięć oka):
+		bool bCanSeeLight = (TimeSinceLastSawLight <= LightVisualMemoryDuration);
+
+		// 2. Czy gracz stoi w strefie rozlania światła (Spill / Halo)?
+		bool bInPenumbraAura = false;
+		AActor* OwnerActor = GetOwner();
+
+		if (OwnerActor && !bCanSeeLight)
+		{
+			APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
+			FVector CamLoc = CamMgr ? CamMgr->GetCameraLocation() : OwnerActor->GetActorLocation();
+			FVector CamFwd = CamMgr ? CamMgr->GetCameraRotation().Vector() : OwnerActor->GetActorForwardVector();
+
+			// Sprawdzamy dwa punkty: środek ciała ORAZ przestrzeń 70cm przed oczami (rozlane światło na ziemi):
+			TArray<FVector> SpillSamplePoints;
+			SpillSamplePoints.Add(OwnerActor->GetActorLocation());
+			SpillSamplePoints.Add(CamLoc + (CamFwd * 70.0f));
+
+			for (USafeLightComponent* Light : OverlappingLightSources)
+			{
+				if (Light && Light->bIsLightActive)
+				{
+					float Dist = FVector::Dist(OwnerActor->GetActorLocation(), Light->GetComponentLocation());
+
+					// Promień aury: 1.5x zasięgu lampy (bardzo naturalny, miękki margines):
+					float PenumbraDistance = FMath::Max(Light->ActualLightRadius * PenumbraAuraMultiplier, MinPenumbraDistance);
+
+					// ZASADA ODWRÓCENIA: Sprawdzamy czy lampa znajduje się za naszymi plecami:
+					FVector DirToLight = (Light->GetComponentLocation() - OwnerActor->GetActorLocation()).GetSafeNormal();
+					bool bLightIsBehindUs = FVector::DotProduct(CamFwd, DirToLight) < -0.1f;
+
+					// Jeśli światło jest za plecami, strefa bezpieczeństwa kurczy się o połowę (do 3-3.5 metra):
+					float EffectivePenumbraDist = bLightIsBehindUs ? (PenumbraDistance * 0.45f) : PenumbraDistance;
+
+					if (Dist <= EffectivePenumbraDist)
+					{
+						FCollisionQueryParams TraceParams;
+						TraceParams.AddIgnoredActor(OwnerActor);
+						if (Light->GetOwner()) TraceParams.AddIgnoredActor(Light->GetOwner());
+
+						// Jeśli choć jeden punkt (ciało LUB przestrzeń przed oczami) łapie światło:
+						for (const FVector& SamplePos : SpillSamplePoints)
+						{
+							FHitResult WallHit;
+							bool bBlockedByWall = GetWorld()->LineTraceSingleByChannel(
+								WallHit,
+								Light->GetComponentLocation(),
+								SamplePos,
+								ECC_Visibility,
+								TraceParams
+							);
+
+							if (!bBlockedByWall)
+							{
+								bInPenumbraAura = true;
+								break;
+							}
+						}
+
+						if (bInPenumbraAura) break;
+					}
+				}
+			}
+		}
+
+		// Półmrok włącza się, gdy widzimy światło LUB stoimy w jego rozlaniu:
+		if (bCanSeeLight || bInPenumbraAura)
+		{
+			CurrentIllumination = EIlluminationState::Penumbra;
+		}
+		else
+		{
+			CurrentIllumination = EIlluminationState::Darkness;
+		}
+	}
+
+	bIsInDarkness = (CurrentIllumination == EIlluminationState::Darkness);
 
 	// ====================================================================
-	// 4. KOSZMAR SPOJRZENIA (Gaze Dread - działa ZAWSZE, nawet w świetle!):
+	// 3. KOSZMAR SPOJRZENIA (Gaze Dread - działa zawsze, niezależnie od światła):
 	// ====================================================================
 	EvaluateMonsterGazeDread(DeltaTime);
 
 	// ====================================================================
-	// 5. OBSŁUGA MROKU I ŚWIATŁA:
+	// 4. LOGIKA PSYCHIKI I SANITY DLA 3 STANÓW (100% Twojego oryginalnego kodu!):
 	// ====================================================================
-	if (bIsInDarkness)
+	switch (CurrentIllumination)
 	{
+	case EIlluminationState::DirectLight:
+	{
+		TimeInDarkness = 0.0f;
+
+		// REGENERACJA SANITY W PEŁNYM ŚWIETLE:
+		float DynamicCap = GetCurrentDynamicComfortCap();
+		if (CurrentSanity < DynamicCap)
+		{
+			float SanityRatio = FMath::Clamp(CurrentSanity / FMath::Max(1.0f, GetMaxSanity()), 0.80f, 1.0f);
+			float BaseRate = bIsAdrenalineActive ? AdrenalineRecoveryRate : BaseLightRecoveryRate;
+			float EffectiveRecoverySpeed = BaseRate * SanityRatio;
+
+			CurrentSanity = FMath::FInterpConstantTo(CurrentSanity, DynamicCap, DeltaTime, EffectiveRecoverySpeed);
+			OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
+		}
+		break;
+	}
+
+	case EIlluminationState::Penumbra:
+	{
+		// PÓŁMROK: Sanity jest bezpieczne (zamrożone).
+		// Czas mroku powoli się cofa, dając oczom wytchnienie:
+		TimeInDarkness = FMath::Max(0.0f, TimeInDarkness - (DeltaTime * 0.75f));
+		break;
+	}
+
+	case EIlluminationState::Darkness:
+	{
+		// GŁĘBOKI MROK: 100% Twojej oryginalnej matematyki drenażu:
 		TimeInDarkness += DeltaTime;
 
 		float LightProximityPenalty = 1.0f;
@@ -102,30 +231,19 @@ void USanityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActo
 			LowestSanityPercentInDarkness = FMath::Min(LowestSanityPercentInDarkness, CurrentSanityPercent);
 		}
 
+		// Losowanie drobnego szaleństwa (szepty):
 		if (!bHasMinorMadness && (CurrentSanity / FMath::Max(1.0f, GetMaxSanity())) < 0.40f && FMath::FRandRange(0.0f, 100.0f) < 2.0f)
 		{
 			TriggerRandomMinorMadness();
 		}
 
+		// Zapaść psychiczna przy 0 HP:
 		if (CurrentSanity <= 0.0f && !bIsGracePeriodActive)
 		{
 			HandleSanityDepleted();
 		}
+		break;
 	}
-	else
-	{
-		TimeInDarkness = 0.0f;
-
-		float DynamicCap = GetCurrentDynamicComfortCap();
-		if (CurrentSanity < DynamicCap)
-		{
-			float SanityRatio = FMath::Clamp(CurrentSanity / FMath::Max(1.0f, GetMaxSanity()), 0.20f, 1.0f);
-			float BaseRate = bIsAdrenalineActive ? AdrenalineRecoveryRate : BaseLightRecoveryRate;
-			float EffectiveRecoverySpeed = BaseRate * SanityRatio;
-
-			CurrentSanity = FMath::FInterpConstantTo(CurrentSanity, DynamicCap, DeltaTime, EffectiveRecoverySpeed);
-			OnSanityChanged.Broadcast(CurrentSanity, GetMaxSanity());
-		}
 	}
 }
 
@@ -333,7 +451,24 @@ bool USanityComponent::CheckLightLineOfSight()
 	AActor* Player = GetOwner();
 	if (!Player) return false;
 
-	FVector PlayerLocation = Player->GetActorLocation();
+	// 1. Zbieramy punkty ciała gracza (Multi-point sample zapobiega problemom przy kucaniu):
+	TArray<FVector> CheckPoints;
+	FVector PlayerCenter = Player->GetActorLocation();
+	CheckPoints.Add(PlayerCenter); // Środek / Klatka
+
+	// Oczy / Kamera gracza:
+	if (APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0))
+	{
+		CheckPoints.Add(CamMgr->GetCameraLocation());
+	}
+	else
+	{
+		CheckPoints.Add(PlayerCenter + FVector(0.0f, 0.0f, 40.0f));
+	}
+
+	// Stopy gracza (przydatne przy niskich przeszkodach):
+	CheckPoints.Add(PlayerCenter - FVector(0.0f, 0.0f, 35.0f));
+
 	FCollisionQueryParams TraceParams;
 	TraceParams.AddIgnoredActor(Player);
 
@@ -341,22 +476,86 @@ bool USanityComponent::CheckLightLineOfSight()
 	{
 		if (!Light || !Light->bIsLightActive) continue;
 
-		FVector LightLocation = Light->GetComponentLocation();
-		FHitResult Hit;
-
-		bool bHit = GetWorld()->LineTraceSingleByChannel(
-			Hit,
-			PlayerLocation,
-			LightLocation,
-			ECC_Visibility,
-			TraceParams
-		);
-
-		if (!bHit || Hit.GetActor() == Light->GetOwner())
+		// ====================================================================
+		// NOWA ZASADA: Pełne światło TYLKO w jasnym rdzeniu (do 60% zasięgu lampy):
+		// ====================================================================
+		float DistToLight = FVector::Dist(Player->GetActorLocation(), Light->GetComponentLocation());
+		float DirectLightThreshold = Light->ActualLightRadius * DirectLightCorePercent;
+		if (DistToLight > DirectLightThreshold)
 		{
-			return true;
+			continue; // Jesteś w ogonie światła -> nie leczymy Sanity, przełączamy na Półmrok!
+		}
+
+		AActor* LightOwner = Light->GetOwner();
+		FVector LightLocation = Light->GetComponentLocation();
+
+		// Ignoruj aktora ognia ORAZ obiekt podpalony (skrzynkę, do której ogień jest podpięty):
+		FCollisionQueryParams LocalParams = TraceParams;
+		if (LightOwner)
+		{
+			LocalParams.AddIgnoredActor(LightOwner);
+			if (AActor* AttachedParentActor = LightOwner->GetAttachParentActor())
+			{
+				LocalParams.AddIgnoredActor(AttachedParentActor);
+			}
+		}
+
+		// Sprawdzamy każdy punkt gracza:
+		for (const FVector& TargetPoint : CheckPoints)
+		{
+			FHitResult Hit;
+			bool bHit = GetWorld()->LineTraceSingleByChannel(
+				Hit,
+				LightLocation, // Promień Z ognia DO gracza
+				TargetPoint,
+				ECC_Visibility,
+				LocalParams
+			);
+
+			// Jeśli promień dotarł do gracza czysto LUB trafił bezpośrednio w ciało gracza:
+			if (!bHit || Hit.GetActor() == Player)
+			{
+				return true; // Sukces: gracz jest oświetlony!
+			}
 		}
 	}
 
+	return false;
+}
+
+bool USanityComponent::CheckCanSeeAnyLightSource()
+{
+	APlayerCameraManager* CamMgr = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (!CamMgr) return false;
+
+	FVector CamLoc = CamMgr->GetCameraLocation();
+	FVector CamFwd = CamMgr->GetCameraRotation().Vector();
+
+	for (USafeLightComponent* Light : OverlappingLightSources)
+	{
+		if (!Light || !Light->bIsLightActive) continue;
+
+		FVector LightLoc = Light->GetComponentLocation();
+		FVector DirToLight = (LightLoc - CamLoc).GetSafeNormal();
+
+		// Szeroki kąt widzenia oka (ok. 130 stopni w kadrze):
+		if (FVector::DotProduct(CamFwd, DirToLight) > 0.15f)
+		{
+			// KLUCZOWY FIX: Celujemy 15 cm PRZED lampę w stronę gracza, 
+			// dzięki czemu promień NIGDY nie uderzy w ścianę, na której wisi kinkiet!
+			FVector TraceTarget = LightLoc - (DirToLight * 15.0f);
+
+			FHitResult Hit;
+			FCollisionQueryParams Params;
+			Params.AddIgnoredActor(GetOwner());
+			if (Light->GetOwner()) Params.AddIgnoredActor(Light->GetOwner());
+
+			bool bBlocked = GetWorld()->LineTraceSingleByChannel(Hit, CamLoc, TraceTarget, ECC_Visibility, Params);
+			if (!bBlocked)
+			{
+				return true; // Gracz ma czysty widok na światło!
+			}
+		}
+	}
 	return false;
 }

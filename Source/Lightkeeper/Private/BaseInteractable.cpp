@@ -23,6 +23,7 @@
 ABaseInteractable::ABaseInteractable()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
 
 	HealthComp = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	ReactionComp = CreateDefaultSubobject<UReactionReceiverComponent>(TEXT("ReactionReceiverComponent"));
@@ -237,6 +238,29 @@ void ABaseInteractable::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherAc
 
 					// 3. Subsystem sam przeliczy ostateczną głośność:
 					Sensory->RegisterNoise(SoundLoc, FinalNoiseRadius, NoiseTag, EffectiveMaterialTag, AcousticNoiseMultiplier);
+				}
+			}
+
+			if (ImpactSpeed >= 180.0f)
+			{
+				if (USafeLightComponent* SafeLight = FindComponentByClass<USafeLightComponent>())
+				{
+					// Jeśli ma żarówkę, pali się i JEST PODATNY NA ZDMUCHNIĘCIE:
+					if (SafeLight->bIsLightActive && SafeLight->bCanBeBlownOut)
+					{
+						SafeLight->SetLightActive(false);
+
+						// Usuwamy tag ognia z systemu chemii:
+						if (ReactionComp)
+						{
+							static const FGameplayTag BurningTag = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
+							ReactionComp->RemoveState(BurningTag);
+						}
+
+#if !UE_BUILD_SHIPPING
+						if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Cyan, TEXT("💨 [FIZYKA] Światło zgasło od pędu powietrza / uderzenia o ziemię!"));
+#endif
+					}
 				}
 			}
 		}
@@ -956,13 +980,28 @@ void ABaseInteractable::OnLockedInteraction_Implementation(AActor* InstigatorAct
 
 void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActor)
 {
-	if (!InstigatorActor || !GateComp) return;
+	if (!InstigatorActor) return;
 
 	if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 	{
 		static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
 		Sensory->RegisterNoise(GetActorLocation(), 200.0f, NoiseTag, MaterialTag, AcousticNoiseMultiplier);
 	}
+
+	// ====================================================================
+	// 1. OBSŁUGA ZAPALANIA I ZDMUCHIWANIA ŚWIECZEK / KINKIETÓW POD [E]:
+	// ====================================================================
+	if (USafeLightComponent* SafeLight = FindComponentByClass<USafeLightComponent>())
+	{
+		if (SafeLight->bIsToggleableLightSource)
+		{
+			// Wywołujemy funkcję z SafeLightComponent, która zrobi wszystko (zgaśnie lub zabierze zapałkę):
+			SafeLight->InteractWithLight(InstigatorActor);
+			return; // Kończymy funkcję – klawisz E obsłużył światło, nie ruszamy zamków od drzwi!
+		}
+	}
+
+	if (!InstigatorActor || !GateComp) return;
 
 	// 1. Zczytujemy klucz z lewej ręki LPM lub prawej dłoni FPP (Czysta Kompozycja):
 	FGameplayTag KeyTagFromHand = FGameplayTag::EmptyTag;

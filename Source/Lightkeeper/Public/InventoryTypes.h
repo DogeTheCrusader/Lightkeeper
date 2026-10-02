@@ -121,6 +121,13 @@ struct FInventoryItemData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Physics & Economy")
 	int32 ItemGoldValue = 10;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Physics & Economy", meta = (ClampMin = "1"))
+	int32 MaxStackSize = 1;
+
+	// Aktualna liczba sztuk w tym konkretnym stosie/pudełku:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "3. Physics & Economy", meta = (ClampMin = "1"))
+	int32 CurrentStack = 1;
+
 	// ====================================================================
 	// 4. COMBAT & HAND TOOL (Visible when EquipType != None)
 	// ====================================================================

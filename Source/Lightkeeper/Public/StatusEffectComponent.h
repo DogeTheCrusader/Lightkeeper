@@ -35,6 +35,9 @@ struct FStatusEffectDataRow : public FTableRowBase
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "5. AI Scent")
 	bool bSpawnsBloodScent = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "6. Hazard Conduction")
+	float ContactConductionDelay = 0.0f;
 };
 
 // Struktura instancji w pamięci RAM:
@@ -69,6 +72,9 @@ struct FActiveStatusInstance
 
 	UPROPERTY()
 	bool bSpawnsBloodScent = false;
+
+	UPROPERTY()
+	float ContactConductionDelay = 0.0f;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStatusEffectAdded, FGameplayTag, StatusTag);

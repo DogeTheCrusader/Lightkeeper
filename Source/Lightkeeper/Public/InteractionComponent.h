@@ -200,5 +200,5 @@ private:
 	void UpdateCrosshairState(EInteractionType HeldType, bool bIsHoldingObject);
 
 	float HeldPropBurnExposureTimer = 0.0f;
-	void ProcessHeldObjectHazardConduction(float DeltaTime);
+	bool ProcessHeldObjectHazardConduction(float DeltaTime);
 };

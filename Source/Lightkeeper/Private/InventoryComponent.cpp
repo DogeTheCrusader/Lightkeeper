@@ -15,7 +15,37 @@ void UInventoryComponent::BeginPlay()
 
 bool UInventoryComponent::TryAddItem(FInventoryItemData ItemToAdd)
 {
-	// Przeszukujemy siatkę Resident Evil w poszukiwaniu wolnego miejsca:
+	// ====================================================================
+	// 1. PRÓBA DOŁOŻENIA DO ISTNIEJĄCEGO STOSU (Stacking):
+	// ====================================================================
+	if (ItemToAdd.MaxStackSize > 1)
+	{
+		for (FInventorySlot& ExistingSlot : StoredItems)
+		{
+			// Jeśli to ten sam przedmiot i stos nie jest pełny:
+			if (ExistingSlot.ItemData.ItemTag.MatchesTagExact(ItemToAdd.ItemTag) &&
+				ExistingSlot.ItemData.CurrentStack < ExistingSlot.ItemData.MaxStackSize)
+			{
+				int32 SpaceInStack = ExistingSlot.ItemData.MaxStackSize - ExistingSlot.ItemData.CurrentStack;
+				int32 AmountToAdd = FMath::Min(ItemToAdd.CurrentStack, SpaceInStack);
+
+				ExistingSlot.ItemData.CurrentStack += AmountToAdd;
+				ItemToAdd.CurrentStack -= AmountToAdd;
+
+				OnInventoryUpdated.Broadcast();
+
+				// Jeśli cały zebrany stos zmieścił się w starym slocie -> SUKCES!
+				if (ItemToAdd.CurrentStack <= 0)
+				{
+					return true;
+				}
+			}
+		}
+	}
+
+	// ====================================================================
+	// 2. JEŚLI ZOSTAŁY RESZTKI LUB PRZEDMIOT NIESTAKOWALNY -> SZUKAMY MIEJSCA NA SIATCE:
+	// ====================================================================
 	for (int32 Row = 0; Row < Rows; ++Row)
 	{
 		for (int32 Col = 0; Col < Columns; ++Col)
@@ -27,7 +57,7 @@ bool UInventoryComponent::TryAddItem(FInventoryItemData ItemToAdd)
 				NewSlot.ItemData = ItemToAdd;
 
 				StoredItems.Add(NewSlot);
-				OnInventoryUpdated.Broadcast(); // Powiadamiamy UI
+				OnInventoryUpdated.Broadcast();
 
 				return true;
 			}
@@ -122,6 +152,45 @@ ABaseInteractable* UInventoryComponent::DropItem(int32 ItemIndex, FVector DropLo
 	}
 
 	return SpawnedProp;
+}
+
+bool UInventoryComponent::ConsumeItemByTag(FGameplayTag ItemTag, int32 AmountToConsume)
+{
+	if (!ItemTag.IsValid() || AmountToConsume <= 0) return false;
+
+	// Przeszukujemy plecak od końca:
+	for (int32 i = StoredItems.Num() - 1; i >= 0; --i)
+	{
+		FInventorySlot& Slot = StoredItems[i];
+
+		if (Slot.ItemData.ItemTag.MatchesTag(ItemTag))
+		{
+			// 1. Jeśli w stosie jest więcej sztuk niż zużywamy:
+			if (Slot.ItemData.CurrentStack > AmountToConsume)
+			{
+				Slot.ItemData.CurrentStack -= AmountToConsume;
+				OnInventoryUpdated.Broadcast(); // Odświeżamy UI (np. cyferkę na ikonie)
+				return true;
+			}
+			// 2. Jeśli zużyliśmy ostatnią sztukę ze stosu (lub dokładnie tyle, ile było):
+			else
+			{
+				int32 RemainingToConsume = AmountToConsume - Slot.ItemData.CurrentStack;
+				StoredItems.RemoveAt(i);
+				OnInventoryUpdated.Broadcast(); // Usuwamy pusty slot z siatki!
+
+				// Jeśli gracz chciał zużyć więcej niż było w tym jednym slocie, szukamy w kolejnym:
+				if (RemainingToConsume > 0)
+				{
+					return ConsumeItemByTag(ItemTag, RemainingToConsume);
+				}
+
+				return true;
+			}
+		}
+	}
+
+	return false; // Brak przedmiotu w plecaku!
 }
 
 bool UInventoryComponent::HasItemWithTag(FGameplayTag ItemTag) const

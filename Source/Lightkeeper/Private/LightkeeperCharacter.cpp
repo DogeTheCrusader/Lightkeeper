@@ -13,6 +13,8 @@
 #include "UtilityManagerComponent.h"
 #include "LanternComponent.h"
 #include "ImSimSensorySubsystem.h"
+#include "Components/PostProcessComponent.h"
+#include "Components/PointLightComponent.h"
 
 ALightkeeperCharacter::ALightkeeperCharacter()
 {
@@ -32,6 +34,34 @@ ALightkeeperCharacter::ALightkeeperCharacter()
 	LanternComp = CreateDefaultSubobject<ULanternComponent>(TEXT("LanternComp"));
 	ReactionComp = CreateDefaultSubobject<UReactionReceiverComponent>(TEXT("ReactionComp"));
 	ProgressionComp = CreateDefaultSubobject<UProgressionComponent>(TEXT("ProgressionComp"));
+
+	// ==========================================================
+	// TWORZENIE POSTPROCESSU ADAPTACJI OCZU:
+	// ==========================================================
+	DarknessAdaptationPP = CreateDefaultSubobject<UPostProcessComponent>(TEXT("DarknessAdaptationPP"));
+	DarknessAdaptationPP->bUnbound = true; // Działa na całą kamerę gracza
+	DarknessAdaptationPP->BlendWeight = 0.0f; // Domyślnie 0% (wzrok niezaadaptowany)
+	DarknessAdaptationPP->SetupAttachment(RootComponent);
+
+	// ==========================================================
+	// SŁABE ŚWIATŁO ŹRENICY - ZŁOTY ŚRODEK:
+	// ==========================================================
+	EyeAdaptationLight = CreateDefaultSubobject<UPointLightComponent>(TEXT("EyeAdaptationLight"));
+	EyeAdaptationLight->SetupAttachment(RootComponent);
+	EyeAdaptationLight->SetCastShadows(false); // Zero cieni (ultra tanie)
+
+	// 1. KLUCZ: Przesuwamy światło na wysokość OCZU i lekko przed gracza!
+	// (Dzięki temu światło nie ginie w podłodze i nie zasłania go własna klatka piersiowa):
+	EyeAdaptationLight->SetRelativeLocation(FVector(25.0f, 0.0f, 65.0f));
+
+	// 2. ŁAGODNY SPADEK RETRO (Wyłączamy fizyczny kwadrat odległości):
+	// Daje to równomierne, delikatne muśnięcie ścian bez jaskrawej plamy na środku:
+	EyeAdaptationLight->bUseInverseSquaredFalloff = false;
+	EyeAdaptationLight->SetLightFalloffExponent(1.9f); // Bardzo miękki, naturalny spadek
+
+	EyeAdaptationLight->SetAttenuationRadius(600.0f);  // Zasięg na 9 metrów (zamiast 6)
+	EyeAdaptationLight->SetIntensity(0.0f);
+	EyeAdaptationLight->SetLightColor(FLinearColor(0.6f, 0.75f, 1.0f)); // Zimny, noktowizyjny odcień
 
 	// ==========================================================
 	// 2. KONFIGURACJA POSTACI I SILNIKA RUCHU:
@@ -98,6 +128,8 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 	// Płynna aktualizacje prędkości co klatkę (działa zawsze i wszędzie!):
 	UpdateMovementSpeed();
 
+	UpdateEyeAdaptation(DeltaTime);
+
 	if (LandingRecoveryTimer > 0.0f)
 	{
 		LandingRecoveryTimer -= DeltaTime;
@@ -140,16 +172,41 @@ void ALightkeeperCharacter::Tick(float DeltaTime)
 		// ====================================================================
 		if (SanityComp)
 		{
-			FString DarkState = SanityComp->bIsInDarkness ? FString::Printf(TEXT("TAK (Czas: %.1fs)"), SanityComp->TimeInDarkness) : TEXT("NIE (W Świetle)");
-			FString MinorMadnessStr = SanityComp->bHasMinorMadness ? TEXT("AKTYWNE (Drain x1.5!)") : TEXT("Brak");
-			float DynamicCapVal = SanityComp->GetCurrentDynamicComfortCap();
+			FString StateStr;
+			FColor StateColor;
 
-			FColor SanityColor = SanityComp->bIsInDarkness ? FColor(200, 100, 255) : FColor::Cyan;
+			switch (SanityComp->CurrentIllumination)
+			{
+			case EIlluminationState::DirectLight:
+				StateStr = TEXT("ŚWIATŁO (Regeneracja)");
+				StateColor = FColor::Cyan;
+				break;
+
+			case EIlluminationState::Penumbra:
+				StateStr = FString::Printf(TEXT("PÓŁMROK (Bezpieczny | Bufor: %.1fs)"), SanityComp->TimeInDarkness);
+				StateColor = FColor::Yellow; // Żółty kolor dla Półmroku!
+				break;
+
+			case EIlluminationState::Darkness:
+				StateStr = FString::Printf(TEXT("GŁĘBOKI MROK (Drenaż | Czas: %.1fs)"), SanityComp->TimeInDarkness);
+				StateColor = FColor(255, 50, 100); // Czerwony/Magenta dla Mroku!
+				break;
+			}
+
+			float DynamicCapVal = SanityComp->GetCurrentDynamicComfortCap();
+			float DynamicCapPercent = (DynamicCapVal / FMath::Max(1.0f, SanityComp->GetMaxSanity())) * 100.0f;
+			FString MinorMadnessStr = SanityComp->bHasMinorMadness ? TEXT("AKTYWNE (Drain x1.5!)") : TEXT("Brak");
 
 			GEngine->AddOnScreenDebugMessage(
-				102, 0.0f, SanityColor,
-				FString::Printf(TEXT("[SANITY] %.1f / %.1f (Limit: %.0f%%) | Mrok: %s | Sufit Ukojenia: %.1f | Drobne Szaleństwo: %s | Zapaści: %d/3"),
-					SanityComp->CurrentSanity, SanityComp->GetMaxSanity(), SanityComp->MaxSanityCapMultiplier * 100.0f, *DarkState, DynamicCapVal, *MinorMadnessStr, SanityComp->MentalCollapseCount)
+				102, 0.0f, StateColor,
+				FString::Printf(TEXT("[SANITY] %.1f / %.1f (Sufit Światła: %.0f%%) | Stan: %s | Trwały Cap: %.0f%% | Szaleństwo: %s | Zapaści: %d/3"),
+					SanityComp->CurrentSanity,
+					DynamicCapVal, // <--- Pokazuje faktyczny cel regeneracji!
+					DynamicCapPercent, // <--- Pokazuje ile % max możesz teraz odzyskać!
+					*StateStr,
+					SanityComp->MaxSanityCapMultiplier * 100.0f,
+					*MinorMadnessStr,
+					SanityComp->MentalCollapseCount)
 			);
 		}
 
@@ -345,6 +402,110 @@ void ALightkeeperCharacter::UpdateMovementSpeed()
 	}
 
 	GetCharacterMovement()->MaxWalkSpeed = TargetSpeed;
+}
+
+void ALightkeeperCharacter::UpdateEyeAdaptation(float DeltaTime)
+{
+	if (!DarknessAdaptationPP || !SanityComp) return;
+
+	float TargetWeight = 0.0f;
+	float InterpSpeed = LightInterpSpeed;
+
+	switch (SanityComp->CurrentIllumination)
+	{
+	case EIlluminationState::DirectLight:
+		// Pełne światło -> 0% adaptacji:
+		TargetWeight = 0.0f;
+		InterpSpeed = LightInterpSpeed;
+		break;
+
+	case EIlluminationState::Penumbra:
+		// PÓŁMROK: Oko adaptuje się tylko MINIMALNIE (max 15%)!
+		// Krawędzie są widoczne, ale ściany i niebo NIGDY się nie przepalą!
+		TargetWeight = 0.15f;
+		InterpSpeed = 1.0f;
+		break;
+
+	case EIlluminationState::Darkness:
+		// GŁĘBOKI MROK: Pełna adaptacja Amnesii po odczekaniu czasu:
+		if (SanityComp->TimeInDarkness > EyeAdaptationDelay)
+		{
+			float Range = FMath::Max(0.1f, EyeAdaptationFullTime - EyeAdaptationDelay);
+			TargetWeight = FMath::Clamp((SanityComp->TimeInDarkness - EyeAdaptationDelay) / Range, 0.0f, 1.0f);
+			InterpSpeed = DarkInterpSpeed;
+		}
+		break;
+	}
+
+	CurrentEyeAdaptationWeight = FMath::FInterpTo(CurrentEyeAdaptationWeight, TargetWeight, DeltaTime, InterpSpeed);
+	DarknessAdaptationPP->BlendWeight = CurrentEyeAdaptationWeight;
+
+	if (EyeAdaptationLight)
+	{
+		EyeAdaptationLight->SetIntensity(CurrentEyeAdaptationWeight * MaxEyeLightIntensity);
+	}
+}
+
+bool ALightkeeperCharacter::CanStandUp() const
+{
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!Capsule || !GetWorld()) return false;
+
+	const float CurrentHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+
+	// Jeśli już stoimy wyprostowani, nie ma czego blokować:
+	if (CurrentHalfHeight >= (StandingCapsuleHalfHeight - 2.0f))
+	{
+		return true;
+	}
+
+	// 1. Wyznaczamy pozycję stóp na ziemi:
+	const FVector ActorLoc = GetActorLocation();
+	const FVector FeetLocation = ActorLoc - FVector(0.0f, 0.0f, CurrentHalfHeight);
+
+	// 2. Promień testowej sfery głowy (lekko węższy niż gracz, żeby nie haczyć o framugi):
+	const float TestRadius = FMath::Max(10.0f, CapsuleRadius - 5.0f);
+
+	// Start: Na obecnej wysokości czubka głowy w kuckach (bezpiecznie NAD podłogą!):
+	const float CurrentHeadZ = FeetLocation.Z + (CurrentHalfHeight * 2.0f) - TestRadius;
+	const FVector SweepStart = FVector(ActorLoc.X, ActorLoc.Y, CurrentHeadZ);
+
+	// Cel: Wysokość głowy po pełnym wyprostowaniu się:
+	const float StandingHeadZ = FeetLocation.Z + (StandingCapsuleHalfHeight * 2.0f) - TestRadius;
+	const FVector SweepEnd = FVector(ActorLoc.X, ActorLoc.Y, StandingHeadZ);
+
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+
+	// Ignorujemy trzymany obiekt:
+	if (InteractionComp && InteractionComp->GetGrabbedActor())
+	{
+		Params.AddIgnoredActor(InteractionComp->GetGrabbedActor());
+	}
+
+	FHitResult Hit;
+	// Skanujemy sferą wyłącznie przestrzeń pionowo NAD głową:
+	bool bHit = GetWorld()->SweepSingleByChannel(
+		Hit,
+		SweepStart,
+		SweepEnd,
+		FQuat::Identity,
+		ECC_Visibility,
+		FCollisionShape::MakeSphere(TestRadius),
+		Params
+	);
+
+#if !UE_BUILD_SHIPPING
+	// WIZUALNY DEBUG (Widoczny w PIE, jeśli coś zablokuje):
+	if (bHit)
+	{
+		// Czerwona kropka w miejscu, gdzie sufit dotknął głowy:
+		DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 10.0f, FColor::Red, false, 0.2f);
+	}
+#endif
+
+	// Jeśli nad głową NIE MA sufitu -> zwracamy TRUE (można wstać!):
+	return !bHit;
 }
 
 void ALightkeeperCharacter::Debug_TestLegs() { Debug_AddInjury(TEXT("Legs")); }

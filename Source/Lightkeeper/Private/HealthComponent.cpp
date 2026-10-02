@@ -199,14 +199,14 @@ void UHealthComponent::HandleOwnerLanded(const FHitResult& Hit, float FallSpeed)
 {
 	if (bIsPalliativeActive) return;
 
-	// Domyślny bezpieczny upadek to 650 cm/s (~2 metry). Precyzja daje bonus +450 cm/s!
+	// Domyślny bezpieczny upadek skalowany z edytora. Precyzja daje bonus!
 	float SafeFallBonus = CachedProgComp ? CachedProgComp->GetSafeFallSpeedBonus() : 0.0f;
-	const float SafeFallSpeed = 650.0f + SafeFallBonus;
+	const float SafeFallSpeed = BaseSafeFallSpeed + SafeFallBonus; // <--- Używa BaseSafeFallSpeed zamiast 650.0f
 
 	if (FallSpeed > SafeFallSpeed)
 	{
 		float ExcessSpeed = FallSpeed - SafeFallSpeed;
-		float CalculatedFallDamage = ExcessSpeed * 0.075f;
+		float CalculatedFallDamage = ExcessSpeed * FallDamageMultiplier; // <--- Używa FallDamageMultiplier zamiast 0.075f
 		static const FGameplayTag FallDamageTag = FGameplayTag::RequestGameplayTag(FName("Damage.Type.Fall"), false);
 		TakeDamage(CalculatedFallDamage, FallDamageTag, Hit);
 	}
@@ -220,7 +220,7 @@ void UHealthComponent::HandleOwnerLanded(const FHitResult& Hit, float FallSpeed)
 		}
 	}
 
-	if (TotalLandingPain > 0.0f && FallSpeed > 600.0f)
+	if (TotalLandingPain > 0.0f && FallSpeed > LandingPainSpeedThreshold) // <--- Używa LandingPainSpeedThreshold zamiast 600.0f
 	{
 		TakeDamage(TotalLandingPain, FGameplayTag());
 #if !UE_BUILD_SHIPPING
@@ -388,7 +388,7 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 
 	if (StatusComp && StatusComp->HasStatusEffect(GuardTag) && DamageTypeTag.ToString().Contains(TEXT("Damage.Type")))
 	{
-		float Absorption = 0.35f; // Domyślna garda pięściami (-35% DMG)
+		float Absorption = BaseFistGuardAbsorption; // <--- Używa BaseFistGuardAbsorption zamiast 0.35f
 		float StaminaCostMod = 1.0f;
 
 		// 1. Sprawdzamy broń w dłoni (Łom / Kostur):
@@ -463,7 +463,7 @@ void UHealthComponent::TakeDamage(float DamageAmount, FGameplayTag DamageTypeTag
 		if (UImSimSensorySubsystem* Sensory = GetWorld()->GetSubsystem<UImSimSensorySubsystem>())
 		{
 			static const FGameplayTag NoiseTag = FGameplayTag::RequestGameplayTag(FName("State.Element.Acoustics.Noise"), false);
-			float PainNoiseRadius = FMath::Clamp(FinalCalculatedDamage * 35.0f, 250.0f, 1800.0f);
+			float PainNoiseRadius = FMath::Clamp(FinalCalculatedDamage * PainNoiseMultiplier, 250.0f, 1800.0f); // <--- Używa PainNoiseMultiplier zamiast 35.0f
 			Sensory->RegisterNoise(GetOwner()->GetActorLocation(), PainNoiseRadius, NoiseTag);
 		}
 	}
@@ -570,9 +570,9 @@ void UHealthComponent::TestFractureInjury(FGameplayTag DamageTypeTag, EAnatomica
 	if (bHasMajorOnLimb && bHasMinorOnLimb) return; // Kończyna maksymalnie zmasakrowana
 
 	// ====================================================================
-	// 2. GWARANTOWANY KRYTYCZNY MAJOR DLA CIOSÓW >= 40 HP (BEZ ŻADNEGO RZUTU RNG!):
+	// 2. GWARANTOWANY KRYTYCZNY MAJOR (Używa CriticalMajorDamageThreshold z Details!):
 	// ====================================================================
-	if (DamageAmount >= 40.0f && !bHasMajorOnLimb)
+	if (DamageAmount >= CriticalMajorDamageThreshold && !bHasMajorOnLimb) // <--- Używa CriticalMajorDamageThreshold zamiast 40.0f
 	{
 		FGameplayTag GuaranteedMajor;
 		switch (HitLimb)
@@ -597,7 +597,7 @@ void UHealthComponent::TestFractureInjury(FGameplayTag DamageTypeTag, EAnatomica
 	}
 
 	// ====================================================================
-	// 3. DOPIERO DLA LŻEJSZYCH CIOSÓW (< 40 HP) RZUCAMY KOŚCIĄ Z PASEKA PĘKNIĘCIA:
+	// 3. DOPIERO DLA LŻEJSZYCH CIOSÓW RZUCAMY KOŚCIĄ Z PASEKA PĘKNIĘCIA:
 	// ====================================================================
 	float Roll = FMath::FRand();
 	if (Roll > FractureMeter) return; // Uniknięcie rany przy małym ciosie!
@@ -653,7 +653,7 @@ void UHealthComponent::TestFractureInjury(FGameplayTag DamageTypeTag, EAnatomica
 		// A. Jeśli wylosowano Minor, ale tkanka jest skrajnie osłabiona (>= 2 rany) -> SKOK DO MAJOR:
 		if (SelectedInjury.ToString().Contains(TEXT("Minor")) && bTissueExhausted && !bHasMajorOnLimb)
 		{
-			if (FMath::FRand() < 0.70f) // 70% szansy na pęknięcie zmęczonej kości!
+			if (FMath::FRand() < TissueExhaustionEvolutionChance) // <--- Używa TissueExhaustionEvolutionChance zamiast 0.70f
 			{
 				FString EvoName = SelectedInjury.ToString().Replace(TEXT("Minor"), TEXT("Major"));
 				SelectedInjury = FGameplayTag::RequestGameplayTag(*EvoName, false);

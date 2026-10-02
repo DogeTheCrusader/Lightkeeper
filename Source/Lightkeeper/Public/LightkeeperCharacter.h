@@ -53,6 +53,12 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
 	class UReactionReceiverComponent* ReactionComp;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UPostProcessComponent* DarknessAdaptationPP;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Components")
+	class UPointLightComponent* EyeAdaptationLight;
+
 	UPROPERTY(BlueprintAssignable, Category = "Lightkeeper|Events")
 	FOnCharacterLandedEvent OnCharacterLanded;
 
@@ -78,6 +84,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")
 	float JumpHeight = 420.0f;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")
+	bool bIsOnLadder = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Movement")
 	float StandingCapsuleHalfHeight = 88.0f;
 
@@ -99,6 +108,38 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Camera")
 	float CameraSensitivity = 0.5f;
+
+	// ==========================================================
+	// ADAPTACJA OCZU DO MROKU (Amnesia Scotopic Vision)
+	// ==========================================================
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Eye Adaptation")
+	float EyeAdaptationDelay = 3.5f; // Po ilu sekundach w mroku oczy zaczynają się adaptować
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Eye Adaptation")
+	float EyeAdaptationFullTime = 9.0f; // Po ilu sekundach osiągamy 100% widzenia w mroku
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Eye Adaptation")
+	float DarkInterpSpeed = 0.4f; // Powolne otwieranie źrenic
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Eye Adaptation")
+	float LightInterpSpeed = 5.0f; // Błyskawiczne zwężenie źrenic po wejściu w światło
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lightkeeper|Eye Adaptation")
+	float CurrentEyeAdaptationWeight = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|Eye Adaptation")
+	float MaxEyeLightIntensity = 350.0f;
+
+	// ==========================================================
+	// KUCANIE
+	// ==========================================================
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|Movement")
+	bool CanStandUp() const;
+
+	// ==========================================================
+	// INTERKACJE
+	// ==========================================================
 
 	UFUNCTION(BlueprintCallable, Category = "Lightkeeper|Interaction")
 	void StartInteraction() { if (InteractionComp) InteractionComp->StartInteraction(); }
@@ -148,4 +189,5 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Jump() override;
 	virtual void Landed(const FHitResult& Hit) override;
+	void UpdateEyeAdaptation(float DeltaTime);
 };

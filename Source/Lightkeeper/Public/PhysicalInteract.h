@@ -13,7 +13,8 @@ enum class EInteractionType : uint8
 	Hinge		UMETA(DisplayName = "Hinge (Zawias/Drzwi)"),
 	Translation UMETA(DisplayName = "Translation (Szyna/Szuflada)"),
 	Crank		UMETA(DisplayName = "Crank (Korba/Zawór)"),
-	Bolt		UMETA(DisplayName = "Bolt (Zasuwka)")
+	Bolt		UMETA(DisplayName = "Bolt (Zasuwka)"),
+	Static_Trigger	UMETA(DisplayName = "Static/Trigger (Wiszące Lampy, Kinkiety)")
 };
 
 UENUM(BlueprintType)

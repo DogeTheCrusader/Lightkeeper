@@ -658,6 +658,9 @@ void ABaseTool::ApplyMeleeHit(AActor* TargetActor, float PhysicalDamage, FGamepl
 	UHealthComponent* TargetHealth = TargetActor->FindComponentByClass<UHealthComponent>();
 	UReactionReceiverComponent* Receiver = TargetActor->FindComponentByClass<UReactionReceiverComponent>();
 
+	FGameplayTag EffectiveStateTag = StateTag.IsValid() ? StateTag : ToolItemData.AttackStateTag;
+	float EffectiveIntensity = (Intensity > 0.0f) ? Intensity : ToolItemData.StateIntensity;
+
 	// 1. GŁÓWNE OBRAŻENIA FIZYCZNE (Obuch / Cięcie):
 	if (PhysicalDamage > 0.0f && TargetHealth)
 	{
@@ -674,12 +677,18 @@ void ABaseTool::ApplyMeleeHit(AActor* TargetActor, float PhysicalDamage, FGamepl
 	}
 
 	// 3. EFEKT CHEMICZNY / STATUS (Podpalenie / Przewodnictwo):
-	if (StateTag.IsValid() && Intensity > 0.0f)
+	if (EffectiveStateTag.IsValid() && EffectiveIntensity > 0.0f && Receiver)
 	{
-		if (TargetActor->FindComponentByClass<UReactionReceiverComponent>())
+		Receiver->ApplyStateImpact(EffectiveStateTag, EffectiveIntensity);
+
+#if !UE_BUILD_SHIPPING
+		if (GEngine)
 		{
-			Receiver->ApplyStateImpact(StateTag, Intensity);
+			GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Orange,
+				FString::Printf(TEXT("🔥 [CIOS ŻYWIOŁEM] Zaaplikowano stan: %s na cel: %s"),
+					*EffectiveStateTag.ToString(), *TargetActor->GetName()));
 		}
+#endif
 	}
 }
 

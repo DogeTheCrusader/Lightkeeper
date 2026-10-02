@@ -1,5 +1,6 @@
 ﻿#include "SafeLightComponent.h"
 #include "SanityComponent.h"
+#include "InventoryComponent.h"
 #include "ReactionReceiverComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Components/PointLightComponent.h"
@@ -20,6 +21,17 @@ USafeLightComponent::USafeLightComponent()
 	SetGenerateOverlapEvents(true);
 }
 
+void USafeLightComponent::OnRegister()
+{
+	Super::OnRegister();
+
+	// Aktualizuje żółtą sferę od razu w edytorze Blueprinta:
+	if (bAutoSyncWithLight)
+	{
+		SyncWithParentLight();
+	}
+}
+
 void USafeLightComponent::BeginPlay()
 {
 	Super::BeginPlay();
@@ -28,15 +40,15 @@ void USafeLightComponent::BeginPlay()
 	SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	SetCollisionResponseToAllChannels(ECR_Overlap);
 
-	if (bAutoSyncWithLight)
-	{
-		SyncWithParentLight();
-	}
-
 	OnComponentBeginOverlap.AddDynamic(this, &USafeLightComponent::OnOverlapBegin);
 	OnComponentEndOverlap.AddDynamic(this, &USafeLightComponent::OnOverlapEnd);
 
-	// AUTONOMICZNA INTEGRACJA Z CHEMIA:
+	// ====================================================================
+	// JEDNO ŹRÓDŁO PRAWDY: Przekazujemy stan bStartsLit do systemu:
+	// ====================================================================
+	bIsLightActive = !bStartsLit; 
+	SetLightActive(bStartsLit);
+
 	if (bIgniteWhenOwnerIsBurning)
 	{
 		if (AActor* Owner = GetOwner())
@@ -50,15 +62,101 @@ void USafeLightComponent::BeginPlay()
 	}
 }
 
+#if WITH_EDITOR
+void USafeLightComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(USafeLightComponent, bStartsLit))
+	{
+		SetLightActive(bStartsLit); // Kliknięcie w edytorze od razu zapala/gasi lampę!
+	}
+}
+#endif
+
+void USafeLightComponent::SetLightActive(bool bNewActive)
+{
+	if (bIsLightActive == bNewActive) return;
+
+	bIsLightActive = bNewActive;
+	UpdatePlayerLightState();
+
+	if (AActor* Owner = GetOwner())
+	{
+		// 1. Gaszenie/Zapalanie fizycznych żarówek wizualnych (Działa w Edytorze i w Grze!):
+		TArray<ULightComponent*> VisualLights;
+		Owner->GetComponents<ULightComponent>(VisualLights);
+		for (ULightComponent* Light : VisualLights)
+		{
+			if (Light)
+			{
+				// Zabezpieczenie: Ignoruj światła, które Level Designer oznaczył tagiem "AlwaysOn"
+				if (Light->ComponentHasTag(FName("AlwaysOn")))
+				{
+					continue; // Zostaw to światło w spokoju!
+				}
+
+				Light->SetVisibility(bIsLightActive);
+			}
+		}
+
+		// 2. Automatyczna synchronizacja z Chemią (URUCHAMIANA TYLKO PODCZAS GRY!)
+		// HasAnyFlags(RF_ClassDefaultObject) zapobiega crashom przy edycji w Blueprintach!
+		if (GetWorld() && GetWorld()->IsGameWorld() && !HasAnyFlags(RF_ClassDefaultObject))
+		{
+			if (UReactionReceiverComponent* ReactionComp = Owner->FindComponentByClass<UReactionReceiverComponent>())
+			{
+				static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
+
+				// Dodajemy lub usuwamy tag TYLKO jeśli stan faktycznie wymaga zmiany, 
+				// zapobiegając w ten sposób nieskończonej pętli z HandleOwnerStateApplied!
+				if (bIsLightActive && !ReactionComp->ActiveStates.HasTagExact(BurningStatus))
+				{
+					ReactionComp->ActiveStates.AddTag(BurningStatus);
+				}
+				else if (!bIsLightActive && ReactionComp->ActiveStates.HasTagExact(BurningStatus))
+				{
+					ReactionComp->ActiveStates.RemoveTag(BurningStatus);
+				}
+			}
+		}
+	}
+
+	// 3. Włączanie/wyłączanie strefy Sanity (Działa w Edytorze i w Grze):
+	SetCollisionEnabled(bIsLightActive ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+
+	if (bIsLightActive && bAutoSyncWithLight)
+	{
+		SyncWithParentLight();
+	}
+
+	// ====================================================================
+	// DIAGNOSTYKA EKRANOWA (Wyświetlana tylko w trakcie Play!)
+	// ====================================================================
+#if !UE_BUILD_SHIPPING
+	if (GEngine && GetWorld() && GetWorld()->IsGameWorld())
+	{
+		FString StateStr = bIsLightActive ? TEXT("💡 [ŚWIATŁO WŁĄCZONE]") : TEXT("🌑 [ŚWIATŁO ZGASZONE]");
+		FColor LogColor = bIsLightActive ? FColor::Yellow : FColor::Silver;
+
+		GEngine->AddOnScreenDebugMessage(
+			(uint64)GetUniqueID() + 400,
+			2.5f,
+			LogColor,
+			FString::Printf(TEXT("%s na obiekcie: %s"), *StateStr, *GetOwner()->GetName())
+		);
+	}
+#endif
+}
+
 void USafeLightComponent::HandleOwnerStateApplied(FGameplayTag StateTag, float Intensity)
 {
 	static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
 
-	// Gdy obiekt staje w płomieniach -> włączamy bezpieczne światło i ustawiamy zasięg!
 	if (StateTag.MatchesTag(BurningStatus))
 	{
 		SetLightActive(true);
-		SetDynamicRadius(350.0f * Intensity);
 	}
 }
 
@@ -66,49 +164,81 @@ void USafeLightComponent::HandleOwnerStateRemoved(FGameplayTag StateTag)
 {
 	static const FGameplayTag BurningStatus = FGameplayTag::RequestGameplayTag(FName("Status.State.Hazard.Burning"), false);
 
-	// Gdy ogień gaśnie -> wyłączamy bezpieczne światło:
 	if (StateTag.MatchesTag(BurningStatus))
 	{
-		SetLightActive(false);
+		if (bExtinguishWhenBurningEnds)
+		{
+			SetLightActive(false);
+		}
 	}
 }
 
 void USafeLightComponent::SyncWithParentLight()
 {
-	if (AActor* Owner = GetOwner())
+	AActor* Owner = GetOwner();
+	if (!Owner) return;
+
+	TArray<ULightComponent*> AllLights;
+	Owner->GetComponents<ULightComponent>(AllLights);
+
+	if (AllLights.IsEmpty()) return;
+
+	ULightComponent* MasterLight = nullptr;
+	float MaxRadius = 0.0f;
+
+	// ZNAJDUJEMY GŁÓWNE ŚWIATŁO (największy zasięg w lampie):
+	for (ULightComponent* Light : AllLights)
 	{
-		USpotLightComponent* SpotLight = Owner->FindComponentByClass<USpotLightComponent>();
-		UPointLightComponent* PointLight = Owner->FindComponentByClass<UPointLightComponent>();
+		if (!Light) continue;
 
-		// Jeśli mamy ZARÓWNO PointLight JAK I SpotLight (Hybryda latarni miejskiej):
-		if (SpotLight && PointLight)
+		float CurrentRadius = 0.0f;
+		if (UPointLightComponent* Point = Cast<UPointLightComponent>(Light))
 		{
-			// Bezpieczny promień bierzemy z większego światła:
-			float MaxRadius = FMath::Max(SpotLight->AttenuationRadius, PointLight->AttenuationRadius);
-			SetSphereRadius(MaxRadius, true);
-
-			// Jeśli jest PointLight, wyłączamy twarde ograniczanie stożkiem (gracz jest bezpieczny pod całą latarnią!):
-			bIsSpotlightCone = false;
-			return;
+			CurrentRadius = Point->AttenuationRadius;
+		}
+		else if (USpotLightComponent* Spot = Cast<USpotLightComponent>(Light))
+		{
+			CurrentRadius = Spot->AttenuationRadius;
 		}
 
-		// Jeśli jest TYLKO sam SpotLight (np. reflektor na wieży):
-		if (SpotLight)
+		if (CurrentRadius > MaxRadius)
 		{
-			SetSphereRadius(SpotLight->AttenuationRadius, true);
-			bIsSpotlightCone = true;
-			ConeAngle = SpotLight->OuterConeAngle;
-			return;
-		}
-
-		// Jeśli jest TYLKO sam PointLight (np. świeczka, ognisko):
-		if (PointLight)
-		{
-			SetSphereRadius(PointLight->AttenuationRadius, true);
-			bIsSpotlightCone = false;
-			return;
+			MaxRadius = CurrentRadius;
+			MasterLight = Light;
 		}
 	}
+
+	if (!MasterLight || MaxRadius <= 0.0f) return;
+
+	// 1. ZAPAMIĘTUJEMY FAKTYCZNY PROMIEŃ ŚWIATŁA DLA SANITY:
+	ActualLightRadius = MaxRadius;
+
+	// 2. SFERĘ KOLIZJI USTAWIAJĄCĄ DETEKCJĘ ROZSZERZAMY NA STREFĘ WZROKU (np. 2.5x lub min. 16 metrów):
+	// Dzięki temu gracz z drugiego końca ulicy ma tę lampę na radarze i może na nią patrzeć!
+	float RegistrationAuraRadius = FMath::Max(MaxRadius * 2.5f, 1600.0f);
+	SetSphereRadius(RegistrationAuraRadius, true);
+
+	if (USpotLightComponent* MasterSpot = Cast<USpotLightComponent>(MasterLight))
+	{
+		bool bHasAnyPointLight = Owner->FindComponentByClass<UPointLightComponent>() != nullptr;
+		if (!bHasAnyPointLight)
+		{
+			bIsSpotlightCone = true;
+			ConeAngle = MasterSpot->OuterConeAngle;
+			SetRelativeRotation(MasterSpot->GetRelativeRotation());
+		}
+		else
+		{
+			bIsSpotlightCone = false;
+		}
+	}
+	else
+	{
+		bIsSpotlightCone = false;
+	}
+
+	UpdateBounds();
+	UpdateOverlaps();
 }
 
 void USafeLightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -206,18 +336,15 @@ void USafeLightComponent::UpdatePlayerLightState()
 		return;
 	}
 
-	// Twoja stara logika: sprawdza Cone i Overlap
 	bool bShouldGiveLight = bIsPlayerInside && bIsLightActive && (!bIsSpotlightCone || bIsPlayerInCone);
 
 	if (bShouldGiveLight && !bHasContributedLight)
 	{
-		// Zamiast AddLightSource() -> Rejestrujemy do sprawdzenia przez ścianę
 		CachedPlayerSanity->RegisterPotentialLight(this);
 		bHasContributedLight = true;
 	}
 	else if (!bShouldGiveLight && bHasContributedLight)
 	{
-		// Wyszliśmy ze światła lub stożka -> Wyrejestruj
 		CachedPlayerSanity->UnregisterPotentialLight(this);
 		bHasContributedLight = false;
 	}
@@ -228,34 +355,63 @@ void USafeLightComponent::SetDynamicRadius(float NewRadius)
 	SetSphereRadius(NewRadius, true);
 }
 
-void USafeLightComponent::SetLightActive(bool bNewActive)
+void USafeLightComponent::InteractWithLight(AActor* Instigator)
 {
-	if (bIsLightActive == bNewActive) return;
+	if (!bIsToggleableLightSource) return;
 
-	bIsLightActive = bNewActive;
-	UpdatePlayerLightState();
-
-	// ====================================================================
-	// AUTOMATYCZNIE GASIMY / ZAPALAMY WSZYSTKIE ŻARÓWKI (PointLight / SpotLight):
-	// ====================================================================
-	if (AActor* Owner = GetOwner())
+	if (bIsLightActive)
 	{
-		TArray<ULightComponent*> VisualLights;
-		Owner->GetComponents<ULightComponent>(VisualLights);
-		for (ULightComponent* Light : VisualLights)
+		// GASZENIE [E]
+		if (bCanBeBlownOut)
 		{
-			if (Light)
-			{
-				Light->SetVisibility(bIsLightActive);
-			}
+			SetLightActive(false);
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Silver, TEXT("💨 [ŚWIATŁO] Zgaszono płomień! Ukryto się w mroku."));
+#endif
+		}
+		else
+		{
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Red, TEXT("❌ [ŚWIATŁO] Tego źródła nie da się zgasić ręcznie!"));
+#endif
 		}
 	}
+	else
+	{
+		// ZAPALANIE [E]
+		UInventoryComponent* InvComp = Instigator ? Instigator->FindComponentByClass<UInventoryComponent>() : nullptr;
+		bool bHasMatch = false;
+
+		if (!bRequiresMatchesToIgnite)
+		{
+			bHasMatch = true; // Zapala się od razu (np. lampka na biurku)
+		}
+		else if (InvComp && RequiredMatchItemTag.IsValid())
+		{
+			// TUTAJ BYŁ BŁĄD - Używamy poprawnej metody z Twojego systemu:
+			bHasMatch = InvComp->HasItemWithTag(RequiredMatchItemTag);
+		}
+
+		if (bHasMatch)
+		{
+			SetLightActive(true);
+
+			if (bRequiresMatchesToIgnite && InvComp)
+			{
+				// Zabrano zapałkę:
+				InvComp->ConsumeItemByTag(RequiredMatchItemTag, 1);
+			}
 
 #if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		FString StateStr = bIsLightActive ? TEXT("💡 [ŚWIATŁO WŁĄCZONE]") : TEXT("🌑 [ŚWIATŁO ZGASZONE]");
-		GEngine->AddOnScreenDebugMessage((uint64)GetUniqueID() + 400, 2.0f, bIsLightActive ? FColor::Yellow : FColor::Silver, StateStr);
-	}
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.5f, FColor::Yellow, TEXT("🔥 [ŚWIATŁO] Zapalono światło!"));
 #endif
+		}
+		else
+		{
+#if !UE_BUILD_SHIPPING
+			if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.0f, FColor::Red,
+				FString::Printf(TEXT("❌ [BRAK PRZEDMIOTU] Potrzebujesz zapałek: %s"), *RequiredMatchItemTag.ToString()));
+#endif
+		}
+	}
 }

@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "CoreMinimal.h"
+#include "FireHazardActor.h"
 #include "Components/ActorComponent.h"
 #include "GameplayTagContainer.h"
 #include "Engine/DataTable.h"
@@ -64,8 +65,12 @@ public:
 	FGameplayTagContainer ActiveStates;
 
 	// Czas samoczynnego wygaszenia ognia dla niezniszczalnych ścian (np. 8s):
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|Timing")
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Lightkeeper|ImSim States|Debug")
 	float AutoExtinguishDuration = 8.0f;
+
+	// Opcjonalne ręczne wymuszenie czasu palenia. Jeśli 0.0 -> czas liczony jest automatycznie z Tabeli DT i masy obiektu.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lightkeeper|ImSim States|Timing")
+	TMap<FGameplayTag, float> CustomStateDurationOverrides;
 
 	// ==========================================================
 	// DELEGATY
@@ -91,9 +96,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Lightkeeper|ImSim States")
 	bool IsVulnerableTo(const FGameplayTag& StateTag) const;
 
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|ImSim States|Timing")
+	float GetCalculatedStateDuration(const FGameplayTag& StateTag, float Intensity = 1.0f) const;
+
+	UFUNCTION(BlueprintPure, Category = "Lightkeeper|ImSim States")
+	bool GetFirstActiveHazard(FGameplayTag& OutHazardState) const;
+
+	const FStatusEffectDataRow* FindStatusEffectRow(const FGameplayTag& StatusTag) const;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Klasa pożaru (wskaż tu BP_FireHazardActor dziedziczący z AFireHazardActor) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Reaction|Fire")
+	TSubclassOf<AFireHazardActor> FireHazardClass;
+
+	/** Aktualnie aktywny aktor pożaru */
+	UPROPERTY()
+	TObjectPtr<AFireHazardActor> ActiveFireHazardActor;
 
 private:
 	FTimerHandle DoTTimerHandle;
@@ -114,6 +135,4 @@ private:
 	bool EvaluateReactionMatrix(const FGameplayTag& IncomingState, float Intensity, const FGameplayTag& OwnerMaterial);
 	void ProcessDoTTick();
 	void CheckAndManageDoTTimer();
-
-	const FStatusEffectDataRow* FindStatusEffectRow(const FGameplayTag& StatusTag) const;
 };
