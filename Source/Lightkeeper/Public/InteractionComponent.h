@@ -190,6 +190,7 @@ private:
 	float LastMechanismPainTime = 0.0f;
 
 	float CurrentRollOffset = 0.0f;
+	float RollDirectionSign = 1.0f;
 
 	float ObstacleLagTimer = 0.0f;
 

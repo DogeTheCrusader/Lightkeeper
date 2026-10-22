@@ -468,6 +468,12 @@ void UInteractionComponent::StartInteraction()
 
 				CurrentRollOffset = 0.0f;
 
+				APlayerCameraManager* CamMgr = GetCameraManager();
+				FVector CamFwd = CamMgr ? CamMgr->GetCameraRotation().Vector() : Owner->GetActorForwardVector();
+				FVector MeshFwdWorld = GrabbedComponent->GetComponentTransform().TransformVectorNoScale(FVector::ForwardVector);
+
+				RollDirectionSign = (FVector::DotProduct(CamFwd, MeshFwdWorld) >= 0.0f) ? 1.0f : -1.0f;
+
 				//GrabbedComponent->OnComponentHit.AddUniqueDynamic(this, &UInteractionComponent::OnGrabbedComponentHit);
 
 				IPhysicalInteract::Execute_GrabObject(GrabbedActor, Owner);
@@ -840,7 +846,7 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 		const float RollSensitivity = FMath::Clamp(1.0f / FMath::Max(1.0f, ObjectMass * InspectWeightMultiplier * ArmResistance), 0.015f, 0.45f);
 
 		// 3. Płynny obrót z oporem:
-		CurrentRollOffset -= MouseX * RollSensitivity * 1.8f;
+		CurrentRollOffset -= MouseX * RollSensitivity * 1.8f * RollDirectionSign;
 		CurrentRollOffset = FMath::Fmod(CurrentRollOffset, 360.0f);
 
 #if !UE_BUILD_SHIPPING
