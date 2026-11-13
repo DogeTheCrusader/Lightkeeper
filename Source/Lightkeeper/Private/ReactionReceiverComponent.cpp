@@ -205,6 +205,17 @@ float UReactionReceiverComponent::GetCalculatedStateDuration(const FGameplayTag&
 	float MassBonus = 0.0f;
 	if (StateTag.MatchesTag(BurningStatus))
 	{
+		if (USafeLightComponent* SafeLight = GetOwner()->FindComponentByClass<USafeLightComponent>())
+		{
+			if (SafeLight->bIsLightActive && !SafeLight->bExtinguishWhenBurningEnds)
+			{
+				return 0.0f; // 0.0f = stan NIE WYGASA z automatu! Obiekt jest trwale gorący!
+			}
+		}
+	}
+
+	if (StateTag.MatchesTag(BurningStatus))
+	{
 		if (AActor* OwnerActor = GetOwner())
 		{
 			if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(OwnerActor->GetComponentByClass(UPrimitiveComponent::StaticClass())))

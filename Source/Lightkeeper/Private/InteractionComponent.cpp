@@ -296,9 +296,18 @@ void UInteractionComponent::TickComponent(float DeltaTime, ELevelTick TickType, 
 
 			if (GEngine)
 			{
+				FString ActiveStatesStr = TEXT("Brak");
+				if (UReactionReceiverComponent* Reaction = FocusActor->FindComponentByClass<UReactionReceiverComponent>())
+				{
+					if (!Reaction->ActiveStates.IsEmpty())
+					{
+						ActiveStatesStr = Reaction->ActiveStates.ToStringSimple();
+					}
+				}
+
 				GEngine->AddOnScreenDebugMessage((uint64)FocusActor->GetUniqueID() + 600, 0.15f, StateColor,
-					FString::Printf(TEXT("🚪 [%s] Typ: %s | %s | %s | Kąt: %.1f° | Fizyka: %s"),
-						*FocusActor->GetName(), *TypeStr, *LockedStr, *LatchedStr, YawAngle, bPhysics ? TEXT("WŁ") : TEXT("WYŁ")));
+					FString::Printf(TEXT("🚪 [%s] | Stany: %s | Typ: %s | %s | Fizyka: %s"),
+						*FocusActor->GetName(), *ActiveStatesStr, *TypeStr, *LockedStr, bPhysics ? TEXT("WŁ") : TEXT("WYŁ")));
 			}
 		}
 	}
@@ -531,15 +540,24 @@ void UInteractionComponent::StartInteraction()
 					GrabbedComponent->SetLinearDamping(1.5f);
 					GrabbedComponent->SetAngularDamping(25.0f);
 
-					const float ActualMass = FMath::Max(1.0f, GrabbedComponent->GetMass());
-					const float MassFactor = FMath::Clamp(1.0f - (ActualMass / 150.0f), 0.35f, 1.0f);
+					const float ActualMass = FMath::Max(0.5f, GrabbedComponent->GetMass());
 
-					PhysicsHandle->LinearStiffness = 650.0f; // Stała sztywność rąk
-					PhysicsHandle->LinearDamping = 45.0f;    // Płynne wyhamowywanie
+					float VigorBonus = 1.0f;
+					if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+					{
+						VigorBonus = ProgComp->GetPhysicalStrengthMultiplier();
+					}
 
-					PhysicsHandle->AngularStiffness = 1500.0f;
-					PhysicsHandle->AngularDamping = 80.0f;
-					PhysicsHandle->InterpolationSpeed = 35.0f;
+					// Efektywna masa uwzględniająca Wigor gracza (0.0 dla lekkich -> 1.0 dla 45kg+)
+					const float EffectiveMass = ActualMass / FMath::Max(VigorBonus, 0.1f);
+					const float HeavyRatio = FMath::Clamp((EffectiveMass - 1.0f) / 40.0f, 0.0f, 1.0f);
+
+					// Lekkie obiekty = sztywne i szybkie | Ciężkie = miękka sprężyna, ciągną się za kamerą
+					PhysicsHandle->LinearStiffness = FMath::Lerp(750.0f, 140.0f, HeavyRatio);
+					PhysicsHandle->LinearDamping = FMath::Lerp(50.0f, 18.0f, HeavyRatio);
+					PhysicsHandle->AngularStiffness = FMath::Lerp(1200.0f, 120.0f, HeavyRatio);
+					PhysicsHandle->AngularDamping = FMath::Lerp(70.0f, 20.0f, HeavyRatio);
+					PhysicsHandle->InterpolationSpeed = FMath::Lerp(35.0f, 6.5f, HeavyRatio);
 
 					PhysicsHandle->GrabComponentAtLocationWithRotation(
 						GrabbedComponent,
@@ -564,13 +582,8 @@ void UInteractionComponent::StartInteraction()
 
 FVector UInteractionComponent::CalculateThrowVelocity(const FVector& Direction, float ObjectMass, float ChargeMultiplier) const
 {
-	float SafeMass = FMath::Max(1.0f, ObjectMass);
-
-	// ====================================================================
-	// UJEDNOLICONA PRĘDKOŚĆ RZUTU: 
-	// Lekki przedmiot (1kg) = 950 cm/s, Średnia skrzynia (20kg) = 750 cm/s, Ciężka (100kg) = 500 cm/s
-	// ====================================================================
-	float MassFactor = FMath::Clamp(1.0f - (FMath::Sqrt(SafeMass) / 25.0f), 0.45f, 1.2f);
+	// Zmniejszono z 1.0f na 0.5f, aby rozróżnić lekkie obiekty (np. 0.5kg vs 2kg)
+	float SafeMass = FMath::Max(0.5f, ObjectMass);
 
 	float ThrowMod = 1.0f;
 	if (AActor* Owner = GetOwner())
@@ -581,11 +594,21 @@ FVector UInteractionComponent::CalculateThrowVelocity(const FVector& Direction, 
 		}
 	}
 
-	// Bazowa siła rzutu = 850 cm/s:
-	float FinalPower = (850.0f * ChargeMultiplier * ThrowMod) * MassFactor;
+	// Siła postaci zmniejsza "odczuwalną" masę przedmiotu zamiast sztucznie mnożyć końcową prędkość
+	float EffectiveMass = SafeMass / FMath::Max(ThrowMod, 0.1f);
+
+	// ====================================================================
+	// REALISTYCZNA PRĘDKOŚĆ RZUTU (przy bazie 850 cm/s i Charge = 1.0):
+	// Lekki (0.5–1kg) = ~1060 cm/s | Średni (15–20kg) = ~730–650 cm/s | Ciężki (50kg) = ~210 cm/s (upuszczenie)
+	// ====================================================================
+	float MassFactor = FMath::Clamp(1.42f - (FMath::Sqrt(EffectiveMass) / 4.8f), 0.12f, 1.15f);
+
+	float FinalPower = (850.0f * ChargeMultiplier) * MassFactor;
 
 	FVector FinalThrowVelocity = Direction.GetSafeNormal() * FinalPower;
-	FinalThrowVelocity.Z += 40.0f;
+
+	// Zredukowano podbicie w górę dla ciężkich obiektów, żeby 50kg skrzynia nie podskakiwała przy rzucie
+	FinalThrowVelocity.Z += 40.0f * MassFactor;
 
 	return FinalThrowVelocity;
 }
@@ -605,8 +628,8 @@ void UInteractionComponent::StopInteraction()
 		// 2. DOPIERO TERAZ przywracamy kolizje i nadajemy lekki impuls zrzutu:
 		if (GrabbedComponent)
 		{
-			GrabbedComponent->SetLinearDamping(0.01f);
-			GrabbedComponent->SetAngularDamping(0.0f);
+			GrabbedComponent->SetLinearDamping(0.45f);
+			GrabbedComponent->SetAngularDamping(2.2f);
 
 			EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
 			if (Type == EInteractionType::Grab_Free)
@@ -669,8 +692,8 @@ void UInteractionComponent::SlamInteraction(float CustomMultiplier)
 
 			if (GrabbedComponent)
 			{
-				GrabbedComponent->SetLinearDamping(0.05f);
-				GrabbedComponent->SetAngularDamping(0.1f);
+				GrabbedComponent->SetLinearDamping(0.45f);
+				GrabbedComponent->SetAngularDamping(2.2f);
 
 				GrabbedComponent->SetPhysicsLinearVelocity(FVector::ZeroVector);
 				GrabbedComponent->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
@@ -1037,6 +1060,46 @@ bool UInteractionComponent::ProcessMouseLook(float MouseX, float MouseY, float C
 			return true;
 		}
 	}
+
+	// ====================================================================
+	// 3. OPÓR KAMERY PRZY TRZYMANIU CIĘŻKICH OBIEKTÓW (Grab_Free)
+	// ====================================================================
+	if (IsValid(GrabbedActor) && GrabbedComponent && GrabbedComponent->IsSimulatingPhysics())
+	{
+		EInteractionType Type = IPhysicalInteract::Execute_GetInteractionType(GrabbedActor);
+		if (Type == EInteractionType::Grab_Free)
+		{
+			float VigorBonus = 1.0f;
+			if (AActor* Owner = GetOwner())
+			{
+				if (UProgressionComponent* ProgComp = Owner->FindComponentByClass<UProgressionComponent>())
+				{
+					VigorBonus = ProgComp->GetPhysicalStrengthMultiplier();
+				}
+			}
+
+			// Efektywna masa po uwzględnieniu siły postaci
+			const float EffectiveMass = GrabbedComponent->GetMass() / FMath::Max(VigorBonus, 0.1f);
+
+			// Powyżej 8 kg ruch myszką zaczyna stawiać opór (do 65% spowolnienia przy 45 kg)
+			if (EffectiveMass > 8.0f)
+			{
+				const float WeightSlowdown = FMath::GetMappedRangeValueClamped(
+					FVector2D(8.0f, 45.0f),
+					FVector2D(1.0f, 0.35f),
+					EffectiveMass
+				);
+
+				if (APawn* PawnOwner = Cast<APawn>(GetOwner()))
+				{
+					PawnOwner->AddControllerYawInput(MouseX * CameraSensitivity * WeightSlowdown);
+					PawnOwner->AddControllerPitchInput(MouseY * CameraSensitivity * WeightSlowdown);
+					return true; // ForwardMouseLook przerwie działanie i nie doda pełnego ruchu!
+				}
+			}
+		}
+	}
+
 
 	return false;
 }

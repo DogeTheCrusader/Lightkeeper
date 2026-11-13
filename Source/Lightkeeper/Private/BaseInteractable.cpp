@@ -1059,24 +1059,8 @@ void ABaseInteractable::TryUnlockFromInput_Implementation(AActor* InstigatorActo
 #endif
 			return;
 		}
-
-		// Otwarcie z plecaka przy pierwszym podejściu (gdy zamek jest zaryglowany):
-		if (GateComp->RequiredKeyTag.IsValid())
-		{
-			if (UInventoryComponent* InvComp = InstigatorActor->FindComponentByClass<UInventoryComponent>())
-			{
-				if (InvComp->HasItemWithTag(GateComp->RequiredKeyTag))
-				{
-					GateComp->UnlockGate(FName("Key"));
-					//bIsLatched = false;
-
-#if !UE_BUILD_SHIPPING
-					if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.5f, FColor::Green, TEXT("🔓 [SUKCES] Zamek otwarty kluczem z plecaka!"));
-#endif
-					return;
-				}
-			}
-		}
+		// TUTAJ BYŁ WYCIĘTY AUTOMAT Z PLECAKA! 
+		// Jeśli gracz nie trzyma właściwego klucza w dłoni, kod nie otwiera zamka sam z siebie.
 	}
 
 	// ====================================================================
